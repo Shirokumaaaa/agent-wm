@@ -497,6 +497,7 @@ class DefaultAgent(AbstractAgent):
         #: after 5 of them.
         self._n_consecutive_timeouts = 0
         self._total_execution_time = 0.0
+        self._step_number = 0
 
     @classmethod
     def from_config(cls, config: DefaultAgentConfig) -> Self:
@@ -555,8 +556,18 @@ class DefaultAgent(AbstractAgent):
 
     def _append_history(self, item: dict[str, Any]) -> None:
         """Adds an item to the history."""
-        self._chook.on_query_message_added(**item)
+        # ``step_number`` is trajectory metadata. Keep it in the persisted history,
+        # but do not add it to the established hook API (custom hooks may not accept it).
+        hook_item = {key: value for key, value in item.items() if key != "step_number"}
+        self._chook.on_query_message_added(**hook_item)
         self.history.append(item)  # type: ignore
+
+    def _ensure_step_number(self, step: StepOutput) -> int:
+        """Assign a stable number to a step when it was not created by ``forward``."""
+        if step.step_number is None:
+            self._step_number += 1
+            step.step_number = self._step_number
+        return step.step_number
 
     def setup(
         self,
@@ -582,6 +593,7 @@ class DefaultAgent(AbstractAgent):
 
         self._problem_statement = problem_statement
         self._env = env
+        self._step_number = 0
         iid = self._problem_statement.id
         self.logger.info("Setting up agent for instance %s", iid)
 
@@ -673,7 +685,11 @@ class DefaultAgent(AbstractAgent):
         )
 
     def _add_templated_messages_to_history(
-        self, templates: list[str], tool_call_ids: list[str] | None = None, **kwargs: str | int | None
+        self,
+        templates: list[str],
+        tool_call_ids: list[str] | None = None,
+        step_number: int | None = None,
+        **kwargs: str | int | None,
     ) -> None:
         """Populate selected template(s) with information (e.g., issue, arguments, state)
         and add to history.
@@ -698,13 +714,16 @@ class DefaultAgent(AbstractAgent):
 
         # We disable syntax highlighting here, because some inputs can lead to a complete cross-thread
         # freeze in the agent. See https://github.com/SWE-agent/SWE-agent/issues/901 .
-        self.logger.info(f"🤖 MODEL INPUT\n{message}", extra={"highlighter": None})
+        step_label = f" [STEP {step_number}]" if step_number is not None else ""
+        self.logger.info(f"🤖 MODEL INPUT{step_label}\n{message}", extra={"highlighter": None})
         history_item: dict[str, Any] = {
             "role": "user",
             "content": message,
             "agent": self.name,
             "message_type": "observation",
         }
+        if step_number is not None:
+            history_item["step_number"] = step_number
         if tool_call_ids:
             assert len(tool_call_ids) == 1, "This should be ensured by the FunctionCalling parse method"
             history_item["role"] = "tool"
@@ -713,6 +732,7 @@ class DefaultAgent(AbstractAgent):
 
     def add_step_to_history(self, step: StepOutput) -> None:
         """Adds a step (command that was run and output) to the model history"""
+        step_number = self._ensure_step_number(step)
         self._append_history(
             {
                 "role": "assistant",
@@ -723,6 +743,7 @@ class DefaultAgent(AbstractAgent):
                 "tool_calls": step.tool_calls,
                 "message_type": "action",
                 "thinking_blocks": step.thinking_blocks,
+                "step_number": step_number,
             },
         )
 
@@ -742,6 +763,7 @@ class DefaultAgent(AbstractAgent):
             elided_chars=elided_chars,
             max_observation_length=self.templates.max_observation_length,
             tool_call_ids=step.tool_call_ids,
+            step_number=step_number,
             **step.state,
         )
 
@@ -1022,8 +1044,10 @@ class DefaultAgent(AbstractAgent):
         # because some of the specific exception handling requires some of these
         # attributes (e.g., if we want to requery the model for a bash syntax error, we
         # need to have the previous model output to format the requery template)
-        step = StepOutput()
+        self._step_number += 1
+        step = StepOutput(step_number=self._step_number)
         step.query = copy.deepcopy(history)
+        self.logger.info("=" * 25 + f" STEP {step.step_number} " + "=" * 25)
         try:
             # Forward model and get actions
             self._chook.on_model_query(messages=history, agent=self.name)
@@ -1218,8 +1242,10 @@ class DefaultAgent(AbstractAgent):
         )
 
     def add_step_to_trajectory(self, step: StepOutput) -> None:
+        step_number = self._ensure_step_number(step)
         trajectory_step = TrajectoryStep(
             {
+                "step_number": step_number,
                 "action": step.action,
                 "observation": step.observation,
                 "response": step.output,
@@ -1247,8 +1273,6 @@ class DefaultAgent(AbstractAgent):
         assert self._env is not None
         self._chook.on_step_start()
 
-        n_step = len(self.trajectory) + 1
-        self.logger.info("=" * 25 + f" STEP {n_step} " + "=" * 25)
         step_output = self.forward_with_handling(self.messages)
         self.add_step_to_history(step_output)
 

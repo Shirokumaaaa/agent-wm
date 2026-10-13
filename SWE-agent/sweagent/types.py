@@ -13,6 +13,7 @@ from typing_extensions import TypedDict
 
 
 class StepOutput(BaseModel):
+    step_number: int | None = None
     query: list[dict] = [{}]
     thought: str = ""
     action: str = ""
@@ -42,6 +43,7 @@ class StepOutput(BaseModel):
 
 
 class TrajectoryStep(TypedDict):
+    step_number: int
     action: str
     observation: str
     response: str
@@ -61,6 +63,7 @@ class _HistoryItem(TypedDict):
 
 # see _HistoryItem for required fields
 class HistoryItem(_HistoryItem, total=False):
+    step_number: int
     agent: str
     is_demo: bool
     thought: str
