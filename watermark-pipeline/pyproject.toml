@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "terminal-response-watermark-pipeline"
+version = "0.1.0"
+description = "External orchestration for SWE-smith, SWE-agent, and terminal-response watermark sampling."
+requires-python = ">=3.11"
+dependencies = [
+    "litellm",
+    "PyYAML",
+    "python-dotenv",
+]
+
+[project.scripts]
+watermark-pipeline = "watermark_pipeline.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+

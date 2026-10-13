@@ -1,0 +1,44 @@
+workspace_root: ../..
+
+run:
+  output_root: watermark-pipeline/runs
+  resume: true
+
+swesmith:
+  task_source: local_static
+  enabled: false
+  project_dir: SWE-smith
+  modal_executable: .venv/bin/modal
+  script: scripts/bug_gen_modal.py
+  repos: pallets/markupsafe
+  language: python
+  phases: gen,val,gather,issue
+  max_bugs: 1
+  modal_volume: swesmith-bug-gen
+  task_remote_path: python/task_insts
+  task_file_glob: "**/*__ig_llm.json"
+  task_limit: 1
+  existing_task_file: SWE-smith/logs/task_insts/pallets__markupsafe.620c06c9_batch5__ig_static_local_branches_final.json
+
+sweagent:
+  executable: .venv/bin/sweagent
+  project_dir: SWE-agent
+  config: SWE-agent/config/swesmith_deepseek_flash.yaml
+  docker_group_wrapper: true
+  docker_group: docker
+  container_proxy_url: http://172.17.0.1:17895
+
+sampler:
+  model: deepseek/deepseek-flash
+  api_base: https://api.deepseek.com
+  api_key_env: DEEPSEEK_API_KEY
+  secret_key_env: WM_SECRET_KEY
+  key_id: local-v1
+  max_attempts: 32
+  candidates_per_round: 4
+  modulus: 16
+  target: 0
+  allow_ephemeral_secret: true
+
+export:
+  write_derived_trajectory: true

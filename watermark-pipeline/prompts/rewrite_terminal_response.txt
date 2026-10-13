@@ -1,0 +1,24 @@
+Rewrite a terminal response for a completed software-engineering task.
+
+The response must preserve the same implemented change and factual claims. It
+must remain concise and developer-facing. Do not add a patch, tool call,
+command, watermark explanation, or facts that are not present in the original
+response. Return JSON only, with this shape:
+{"candidates": ["candidate 1", "candidate 2"]}
+
+Generate exactly {{candidate_count}} distinct candidates. This is rewrite
+round {{round_index}}. Use the following rewrite direction:
+{{rewrite_direction}}
+
+TASK SRO:
+{{task_sro}}
+
+RESPONSE SRO:
+{{response_sro}}
+
+PROBLEM STATEMENT:
+{{problem_statement}}
+
+ORIGINAL TERMINAL RESPONSE:
+{{original_response}}
+

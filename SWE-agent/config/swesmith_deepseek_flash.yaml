@@ -64,22 +64,45 @@ agent:
     registry_variables:
       USE_FILEMAP: 'true'
       SUBMIT_REVIEW_MESSAGES:
-        - |
-          Thank you for your work on this issue. Please carefully follow the steps below to help review your changes.
+      - |
+        Thank you for your work on this issue. Please carefully follow the steps below to help review your changes.
 
-          1. If you made any changes to your code after running the reproduction script, please run the reproduction script again.
-            If the reproduction script is failing, please revisit your changes and make sure they are correct.
-            If you have already removed your reproduction script, please ignore this step.
-          2. Remove your reproduction script (if you haven't done so already).
-          3. If you have modified any TEST files, please revert them to the state they had before you started fixing the issue.
-            Use the diff below to find the files you need to revert.
-          4. Run the submit command again to confirm.
+        1. If you made any changes to your code after running the reproduction script, please run the reproduction script again.
+          If the reproduction script is failing, please revisit your changes and make sure they are correct.
+          If you have already removed your reproduction script, please ignore this step.
 
-          Here is a list of all of your changes:
+        2. Remove your reproduction script (if you haven't done so already).
 
-          <diff>
-          {{diff}}
-          </diff>
+        3. If you have modified any TEST files, please revert them to the state they had before you started fixing the issue.
+
+        4. Run the submit command again to confirm.
+
+        Before the final submission, use the following problem statement to frame your response:
+
+        <problem_statement>
+        {{problem_statement}}
+        </problem_statement>
+
+        In your final response, provide a concise developer-facing explanation
+        of the main change.
+
+        Focus on:
+        - the primary component or functionality affected;
+        - the behavior that was fixed or improved;
+        - the reason this change resolves the issue.
+
+        Mention verification briefly if relevant.
+
+        Avoid listing unrelated implementation details.
+
+        After the explanation, invoke exactly one `submit`
+        tool call in the same response.
+
+        Here is a list of all of your changes:
+
+        <diff>
+        {{diff}}
+        </diff>
     enable_bash_tool: true
     parse_function:
       type: function_calling
