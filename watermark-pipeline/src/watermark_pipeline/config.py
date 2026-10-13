@@ -34,6 +34,17 @@ class SWESmithConfig:
     task_limit: int | None
     required_task_count: int | None
     existing_task_file: Path | None
+    local_profile: str
+    local_generator: str
+    local_generator_config: str
+    local_generator_model: str
+    local_generation_workers: int
+    local_validation_workers: int
+    local_base_image: str
+    local_base_branch: str
+    local_task_repo: str
+    local_issue_mode: str
+    local_image_tag_prefix: str
 
 
 @dataclass(frozen=True)
@@ -44,6 +55,7 @@ class SWEAgentConfig:
     docker_group_wrapper: bool
     docker_group: str
     container_proxy_url: str | None
+    num_workers: int | None
 
 
 @dataclass(frozen=True)
@@ -106,8 +118,10 @@ class PipelineConfig:
                 task_source=str(smith.get("task_source", "modal" if smith.get("enabled", False) else "existing")),
                 enabled=bool(smith.get("enabled", False)),
                 project_dir=_resolve(workspace_root, smith["project_dir"]),
-                modal_executable=_resolve(workspace_root, smith["modal_executable"]),
-                script=Path(smith["script"]),
+                modal_executable=_resolve(
+                    workspace_root, smith.get("modal_executable", ".venv/bin/modal")
+                ),
+                script=Path(smith.get("script", "scripts/bug_gen_modal.py")),
                 repos=str(smith.get("repos", "")),
                 language=str(smith.get("language", "python")),
                 phases=str(smith.get("phases", "gen,val,gather,issue")),
@@ -116,8 +130,8 @@ class PipelineConfig:
                     smith.get("issue_gen_config", "configs/issue_gen/ig_v2.yaml")
                 ),
                 issue_gen_workers=int(smith.get("issue_gen_workers", 8)),
-                modal_volume=str(smith["modal_volume"]),
-                task_remote_path=str(smith["task_remote_path"]),
+                modal_volume=str(smith.get("modal_volume", "swesmith-bug-gen")),
+                task_remote_path=str(smith.get("task_remote_path", "python/task_insts")),
                 task_file_glob=str(smith.get("task_file_glob", "**/*__ig_llm.json")),
                 task_limit=(int(smith["task_limit"]) if smith.get("task_limit") is not None else None),
                 required_task_count=(
@@ -128,6 +142,23 @@ class PipelineConfig:
                 existing_task_file=(
                     _resolve(workspace_root, existing_task) if existing_task else None
                 ),
+                local_profile=str(smith.get("local_profile", "")),
+                local_generator=str(smith.get("local_generator", "procedural")),
+                local_generator_config=str(
+                    smith.get("local_generator_config", "configs/bug_gen/lm_modify.yml")
+                ),
+                local_generator_model=str(
+                    smith.get("local_generator_model", "deepseek/deepseek-flash")
+                ),
+                local_generation_workers=int(smith.get("local_generation_workers", 1)),
+                local_validation_workers=int(smith.get("local_validation_workers", 4)),
+                local_base_image=str(smith.get("local_base_image", "")),
+                local_base_branch=str(smith.get("local_base_branch", "main")),
+                local_task_repo=str(smith.get("local_task_repo", "")),
+                local_issue_mode=str(smith.get("local_issue_mode", "static")),
+                local_image_tag_prefix=str(
+                    smith.get("local_image_tag_prefix", "wm-local")
+                ),
             ),
             sweagent=SWEAgentConfig(
                 executable=_resolve(workspace_root, agent["executable"]),
@@ -137,6 +168,9 @@ class PipelineConfig:
                 docker_group=str(agent.get("docker_group", "docker")),
                 container_proxy_url=(
                     str(agent["container_proxy_url"]) if agent.get("container_proxy_url") else None
+                ),
+                num_workers=(
+                    int(agent["num_workers"]) if agent.get("num_workers") is not None else None
                 ),
             ),
             sampler=SamplerConfig(

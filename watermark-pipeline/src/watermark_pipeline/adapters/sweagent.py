@@ -189,6 +189,8 @@ def _write_runtime_config(
     data = yaml.safe_load(config.sweagent.config.read_text(encoding="utf-8"))
     data["instances"]["path"] = str(task_file)
     data["output_dir"] = str(output_dir)
+    if config.sweagent.num_workers is not None:
+        data["num_workers"] = config.sweagent.num_workers
 
     proxy_url = config.sweagent.container_proxy_url
     if proxy_url:

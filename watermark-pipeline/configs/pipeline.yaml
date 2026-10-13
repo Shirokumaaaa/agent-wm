@@ -5,20 +5,21 @@ run:
   resume: true
 
 swesmith:
-  task_source: production
+  task_source: local_production
   enabled: true
   project_dir: SWE-smith
-  modal_executable: .venv/bin/modal
-  script: scripts/bug_gen_modal.py
-  repos: pallets/markupsafe
-  language: python
-  phases: gen,val,gather,issue
-  max_bugs: 5
-  issue_gen_config: configs/issue_gen/ig_v2.yaml
-  issue_gen_workers: 8
-  modal_volume: swesmith-bug-gen
-  task_remote_path: python/task_insts
-  task_file_glob: "**/*__ig_llm.json"
+  local_profile: pallets__markupsafe.620c06c9
+  local_generator: lm_modify
+  local_generator_config: configs/bug_gen/lm_modify.yml
+  local_generator_model: deepseek/deepseek-flash
+  local_generation_workers: 1
+  local_validation_workers: 5
+  local_base_image: swebench/swesmith.x86_64.pallets_1776_markupsafe.620c06c9
+  local_base_branch: main
+  local_task_repo: swesmith/pallets__markupsafe.620c06c9
+  local_issue_mode: static
+  local_image_tag_prefix: wm-local
+  max_bugs: 30
   task_limit: 5
   required_task_count: 5
 
@@ -28,6 +29,7 @@ sweagent:
   config: SWE-agent/config/swesmith_deepseek_flash.yaml
   docker_group_wrapper: true
   docker_group: docker
+  num_workers: 1
 
 sampler:
   model: deepseek/deepseek-flash

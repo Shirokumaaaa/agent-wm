@@ -6,24 +6,27 @@ existing command-line interfaces.
 
 The production pipeline runs these stages:
 
-1. Snapshot the existing SWE-smith task instance IDs in the configured Modal volume.
-2. Invoke SWE-smith's complete `gen,val,gather,issue` production workflow.
-3. Download the resulting `*__ig_llm.json` artifacts and select only instance IDs
-   that did not exist in the pre-production snapshot. The run fails instead of
-   falling back to historical tasks when no new instance was produced.
-   `required_task_count` can make the run fail unless the requested number of
-   genuinely new tasks is available; the production configuration requires 5.
-4. Invoke `sweagent run-batch` with runtime path overrides.
-5. Require `run_batch_exit_statuses.yaml` to cover every input instance, reject
+1. Snapshot the existing local SWE-smith bug artifact IDs.
+2. Invoke SWE-smith's local bug generator and collect only artifacts created by
+   the current run.
+3. Invoke SWE-smith's local Docker validation harness, select only candidates
+   with non-empty `FAIL_TO_PASS` and `PASS_TO_PASS` sets, and build a run-scoped
+   local Docker image containing their bug branches. No branch is pushed to a
+   Git remote.
+4. Invoke SWE-smith's local issue generator and require the configured number
+   of complete, newly produced task instances. The production configuration
+   requires 5.
+5. Invoke `sweagent run-batch` with runtime path overrides.
+6. Require `run_batch_exit_statuses.yaml` to cover every input instance, reject
    uncaught batch failures, and require one parseable, identity-matching `.traj`
    per instance. A cached successful stage is revalidated before resume.
-6. Read the final natural-language response associated with `submit`.
-7. Use DeepSeek to extract SROs and generate rewrite candidates.
-8. Accept the first candidate satisfying the keyed watermark predicate, or
+7. Read the final natural-language response associated with `submit`.
+8. Use DeepSeek to extract SROs and generate rewrite candidates.
+9. Accept the first candidate satisfying the keyed watermark predicate, or
    reject the instance when the attempt budget is exhausted.
-9. Export accepted, rejected, and ineligible records.
+10. Export accepted, rejected, and ineligible records.
 
-`task_source: production` is the normal mode. The `local_static` and `existing`
+`task_source: local_production` is the normal mode. The `local_static` and `existing`
 modes are retained only for explicitly requested replay/debug runs; they do not
 constitute new task production.
 
@@ -48,10 +51,9 @@ All generated files are written below `watermark-pipeline/runs/` by default.
 Original trajectory files are read-only inputs. Derived trajectories, when
 enabled, are written under the external run directory.
 
-For production runs, `tasks/task_production.json` records the SWE-smith
-entrypoint, requested phases, pre/post task counts, newly observed instance IDs,
-and the exact new instances passed to SWE-agent. It does not contain trajectory
-or patch hashes.
+For production runs, `tasks/task_production.json` records the SWE-smith commands,
+pre/post bug counts, validation selection, local image name, and the exact new
+instances passed to SWE-agent. It does not contain trajectory or patch hashes.
 
 After SWE-agent returns, `trajectories/batch_validation.json` records the
 per-instance batch status and trajectory path. `agent_execution` is marked
@@ -62,9 +64,8 @@ the run manifest.
 
 - `DEEPSEEK_API_KEY`: DeepSeek API credential.
 - `WM_SECRET_KEY`: secret used by the watermark predicate.
-- Any credentials already required by the selected SWE-smith and SWE-agent
-  configurations, including Modal authentication and the Modal secrets used by
-  SWE-smith (`GITHUB_TOKEN` and `PORTKEY_API_KEY` for the current production
-  script).
+- Any credentials already required by the selected SWE-smith generator and
+  SWE-agent configuration. The current local generator uses the same
+  `DEEPSEEK_API_KEY`; Modal credentials are not used.
 
 Secrets are never included in run manifests or exported dataset records.
