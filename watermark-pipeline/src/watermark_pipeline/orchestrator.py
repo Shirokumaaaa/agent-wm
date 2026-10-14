@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import logging
-import os
-import secrets
 from datetime import datetime
 from pathlib import Path
 
@@ -100,7 +98,15 @@ class PipelineRunner:
         stage = "watermark_sampling"
         if self.config.run.resume and self.state.stage_succeeded(stage):
             records = load_tasks(Path(self.state.output(stage, "decision_file")))
-            return [_decision_from_dict(item) for item in records]
+            if all(
+                item.get("sampling", {}).get("algorithm") == ALGORITHM
+                and item.get("sampling", {}).get("key_id") == self.config.sampler.key_id
+                for item in records
+            ):
+                return [_decision_from_dict(item) for item in records]
+            LOGGER.warning(
+                "Cached watermark decisions use a different algorithm or key ID and will be rerun"
+            )
 
         self._invalidate_stages(
             ("dataset_export",),
@@ -162,7 +168,6 @@ class PipelineRunner:
 
         try:
             candidate, attempts, task_sro, original_sro, sampled_sro = sampler.sample(
-                instance_id=instance_id,
                 problem_statement=problem_statement,
                 original_response=terminal.response,
             )
@@ -216,12 +221,12 @@ class PipelineRunner:
         prompts = PromptStore(self.config.project_dir / "prompts")
         extractor = SROExtractor(client, prompts)
         generator = CandidateGenerator(client, prompts)
-        secret = os.environ.get(self.config.sampler.secret_key_env, "")
-        if not secret and self.config.sampler.allow_ephemeral_secret:
-            LOGGER.warning("Using an in-memory ephemeral watermark key for this demonstration run")
-            secret = secrets.token_urlsafe(32)
         predicate = WatermarkPredicate(
-            secret=secret,
+            watermark=self.config.sampler.watermark,
+            code_key=self.config.sampler.code_key,
+            task_key=self.config.sampler.task_key,
+            response_key=self.config.sampler.response_key,
+            code_modulus=self.config.sampler.code_modulus,
             modulus=self.config.sampler.modulus,
             target=self.config.sampler.target,
         )

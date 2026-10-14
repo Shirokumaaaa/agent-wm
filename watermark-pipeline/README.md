@@ -26,6 +26,14 @@ The production pipeline runs these stages:
    reject the instance when the attempt budget is exhausted.
 10. Export accepted, rejected, and ineligible records.
 
+The keyed predicate hashes only the canonical task SRO and canonical response
+SRO. Instance IDs, algorithm labels, timestamps, trajectory/step metadata, and
+the original response text are not part of the HMAC message.
+
+Dataset partitions are written as expanded JSON arrays in `accepted.json`,
+`rejected.json`, `ineligible.json`, and `error.json`. They are not emitted as
+single-line JSONL records.
+
 `task_source: local_production` is the normal mode. The `local_static` and `existing`
 modes are retained only for explicitly requested replay/debug runs; they do not
 constitute new task production.

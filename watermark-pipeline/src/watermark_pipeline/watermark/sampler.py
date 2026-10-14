@@ -23,7 +23,6 @@ class RejectionSampler:
     def sample(
         self,
         *,
-        instance_id: str,
         problem_statement: str,
         original_response: str,
     ) -> tuple[str | None, int, SRO, SRO, SRO | None]:
@@ -45,16 +44,14 @@ class RejectionSampler:
             )
             for candidate in candidates[:count]:
                 attempts += 1
+                sampled_sro = self.extractor.from_response(candidate)
                 if self.predicate.accepts(
-                    instance_id=instance_id,
                     task_sro=task_sro,
-                    response=candidate,
+                    response_sro=sampled_sro,
                 ):
-                    sampled_sro = self.extractor.from_response(candidate)
                     return candidate, attempts, task_sro, original_sro, sampled_sro
             round_index += 1
             if not candidates:
                 attempts += count
 
         return None, attempts, task_sro, original_sro, None
-

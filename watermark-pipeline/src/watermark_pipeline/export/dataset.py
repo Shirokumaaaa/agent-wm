@@ -24,14 +24,15 @@ def write_decisions(
         grouped[decision.decision].append(decision.to_dict(algorithm=algorithm, key_id=key_id))
 
     for decision, records in grouped.items():
-        path = run_dir / f"{decision}.jsonl"
-        with path.open("w", encoding="utf-8") as handle:
-            for record in records:
-                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+        path = run_dir / f"{decision}.json"
+        path.write_text(
+            json.dumps(records, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
 
     counts = {name: len(records) for name, records in grouped.items()}
     (run_dir / "run_report.json").write_text(
-        json.dumps({"counts": counts}, indent=2, ensure_ascii=False), encoding="utf-8"
+        json.dumps({"counts": counts}, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
     )
     return counts
-

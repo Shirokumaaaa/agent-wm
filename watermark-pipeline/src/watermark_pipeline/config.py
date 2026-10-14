@@ -63,13 +63,16 @@ class SamplerConfig:
     model: str
     api_base: str
     api_key_env: str
-    secret_key_env: str
+    watermark: str
+    code_key: str
+    task_key: str
+    response_key: str
     key_id: str
     max_attempts: int
     candidates_per_round: int
+    code_modulus: int
     modulus: int
     target: int
-    allow_ephemeral_secret: bool
 
 
 @dataclass(frozen=True)
@@ -177,13 +180,16 @@ class PipelineConfig:
                 model=str(sampler["model"]),
                 api_base=str(sampler["api_base"]),
                 api_key_env=str(sampler["api_key_env"]),
-                secret_key_env=str(sampler["secret_key_env"]),
+                watermark=str(sampler["watermark"]),
+                code_key=str(sampler["code_key"]),
+                task_key=str(sampler["task_key"]),
+                response_key=str(sampler["response_key"]),
                 key_id=str(sampler.get("key_id", "default")),
                 max_attempts=int(sampler.get("max_attempts", 32)),
                 candidates_per_round=int(sampler.get("candidates_per_round", 4)),
+                code_modulus=int(sampler.get("code_modulus", 2**31 - 1)),
                 modulus=int(sampler.get("modulus", 16)),
                 target=int(sampler.get("target", 0)),
-                allow_ephemeral_secret=bool(sampler.get("allow_ephemeral_secret", False)),
             ),
             export=ExportConfig(
                 write_derived_trajectory=bool(export.get("write_derived_trajectory", True))

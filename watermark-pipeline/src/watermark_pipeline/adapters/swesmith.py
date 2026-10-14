@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from watermark_pipeline.config import PipelineConfig
+from watermark_pipeline.config import PipelineConfig, SWESmithConfig
 from watermark_pipeline.process import run_command
 
 
@@ -153,9 +153,10 @@ def _produce_local_tasks(
         raise RuntimeError("swesmith.local_base_image is required for local_production")
     if not smith.local_task_repo:
         raise RuntimeError("swesmith.local_task_repo is required for local_production")
-    if smith.local_issue_mode != "static":
+    if smith.local_issue_mode not in {"static", "llm"}:
         raise RuntimeError(
-            "Only SWE-smith's static local issue generator is currently supported"
+            "Unsupported swesmith.local_issue_mode: "
+            f"{smith.local_issue_mode} (expected 'static' or 'llm')"
         )
 
     bug_dir = smith.project_dir / "logs" / "bug_gen" / smith.local_profile
@@ -234,19 +235,26 @@ def _produce_local_tasks(
 
     gathered_path = tasks_dir / "local_gathered_tasks.json"
     _write_tasks(gathered_path, valid_tasks)
-    issue_command: list[str | Path] = [
-        sys.executable,
-        "-m",
-        "swesmith.issue_gen.get_static",
-        gathered_path,
-    ]
-    run_command(issue_command, cwd=smith.project_dir)
-    issue_path = gathered_path.with_name(f"{gathered_path.stem}__ig_static.json")
+    issue_command = _local_issue_command(config, gathered_path)
+    run_command(
+        issue_command,
+        cwd=smith.project_dir,
+        env=generation_env,
+    )
+    issue_path = _local_issue_output_path(smith, gathered_path)
     produced_tasks = _read_json_list(issue_path)
-    if len(produced_tasks) != len(valid_tasks):
+    if not produced_tasks:
+        raise RuntimeError("SWE-smith issue generation did not produce any task instance")
+    if required_count is not None and len(produced_tasks) < required_count:
         raise RuntimeError(
-            "SWE-smith issue generation did not preserve the selected task count: "
-            f"selected={len(valid_tasks)}, produced={len(produced_tasks)}"
+            "SWE-smith issue generation yielded fewer tasks than required: "
+            f"required={required_count}, produced={len(produced_tasks)}"
+        )
+    if len(produced_tasks) != len(valid_tasks):
+        LOGGER.warning(
+            "SWE-smith issue generation kept %d of %d task instances",
+            len(produced_tasks),
+            len(valid_tasks),
         )
     if not all(_is_task(task, require_problem_statement=True) for task in produced_tasks):
         raise RuntimeError("SWE-smith local issue output contains incomplete tasks")
@@ -261,6 +269,7 @@ def _produce_local_tasks(
                 "mode": "local_production",
                 "profile": smith.local_profile,
                 "generator": smith.local_generator,
+                "local_issue_mode": smith.local_issue_mode,
                 "generation_command": [str(part) for part in generation_command],
                 "collect_command": [str(part) for part in collect_command],
                 "validation_command": [str(part) for part in validation_command],
@@ -317,6 +326,32 @@ def _local_generation_command(config: PipelineConfig, run_dir: Path) -> list[str
             str(seed),
         ]
     raise RuntimeError(f"Unsupported local SWE-smith generator: {smith.local_generator}")
+
+
+def _local_issue_command(config: PipelineConfig, gathered_path: Path) -> list[str | Path]:
+    smith = config.swesmith
+    if smith.local_issue_mode == "static":
+        return [sys.executable, "-m", "swesmith.issue_gen.get_static", gathered_path]
+    issue_config = Path(smith.issue_gen_config)
+    if not issue_config.is_absolute():
+        issue_config = config.workspace_root / issue_config
+    return [
+        sys.executable,
+        "-m",
+        "swesmith.issue_gen.generate",
+        "-d",
+        gathered_path,
+        "-c",
+        issue_config,
+        "-w",
+        str(smith.issue_gen_workers),
+        "-r",
+    ]
+
+
+def _local_issue_output_path(smith: SWESmithConfig, gathered_path: Path) -> Path:
+    suffix = "__ig_static" if smith.local_issue_mode == "static" else "__ig_llm"
+    return gathered_path.with_name(f"{gathered_path.stem}{suffix}.json")
 
 
 def _bug_artifact_ids(root: Path, profile: str) -> set[str]:
