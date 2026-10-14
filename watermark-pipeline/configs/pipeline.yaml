@@ -8,22 +8,30 @@ swesmith:
   task_source: local_production
   enabled: true
   project_dir: SWE-smith
-  local_profile: pallets__markupsafe.620c06c9
+  # The first local_repository_limit profiles are enabled for this run.
+  # Base image and task repo names are derived from each SWE-smith profile.
+  # Use a mapping when a repository needs a non-main base branch or overrides.
+  local_repositories:
+    - pallets__markupsafe.620c06c9
+    - pallets__click.fde47b4b
+    - pallets__flask.bc098406
+    - pallets__jinja.ada0a9a6
+    - profile: marshmallow-code__marshmallow.9716fc62
+      base_branch: dev
+  local_repository_limit: 5
   local_generator: lm_modify
   local_generator_config: configs/bug_gen/lm_modify.yml
   local_generator_model: deepseek/deepseek-flash
   local_generation_workers: 1
   local_validation_workers: 5
-  local_base_image: swebench/swesmith.x86_64.pallets_1776_markupsafe.620c06c9
-  local_base_branch: main
-  local_task_repo: swesmith/pallets__markupsafe.620c06c9
   local_issue_mode: llm
   issue_gen_config: watermark-pipeline/configs/issue_gen/ig_deepseek.yaml
   issue_gen_workers: 4
   local_image_tag_prefix: wm-local
+  # Number of bug-generation attempts to start across selected repositories.
   max_bugs: 30
-  task_limit: 5
-  required_task_count: 5
+  task_limit: 30
+  required_task_count: null
 
 sweagent:
   executable: .venv/bin/sweagent

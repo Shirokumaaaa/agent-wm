@@ -6,16 +6,17 @@ existing command-line interfaces.
 
 The production pipeline runs these stages:
 
-1. Snapshot the existing local SWE-smith bug artifact IDs.
-2. Invoke SWE-smith's local bug generator and collect only artifacts created by
+1. Select the first `local_repository_limit` entries from
+   `swesmith.local_repositories` and distribute the global `max_bugs` attempt
+   count across them.
+2. For each selected repository, snapshot its existing SWE-smith bug artifact
+   IDs, invoke the local bug generator, and collect only artifacts created by
    the current run.
-3. Invoke SWE-smith's local Docker validation harness, select only candidates
-   with non-empty `FAIL_TO_PASS` and `PASS_TO_PASS` sets, and build a run-scoped
-   local Docker image containing their bug branches. No branch is pushed to a
-   Git remote.
-4. Invoke SWE-smith's local issue generator and require the configured number
-   of complete, newly produced task instances. The production configuration
-   requires 5.
+3. Invoke SWE-smith's local Docker validation harness and retain candidates
+   with non-empty `FAIL_TO_PASS` and `PASS_TO_PASS` sets.
+4. Invoke the local issue generator, then build one run-scoped Docker image per
+   successful repository containing all retained bug branches for that
+   repository. No branch is pushed to a Git remote.
 5. Invoke `sweagent run-batch` with runtime path overrides.
 6. Require `run_batch_exit_statuses.yaml` to cover every input instance, reject
    uncaught batch failures, and require one parseable, identity-matching `.traj`
@@ -37,6 +38,35 @@ single-line JSONL records.
 `task_source: local_production` is the normal mode. The `local_static` and `existing`
 modes are retained only for explicitly requested replay/debug runs; they do not
 constitute new task production.
+
+For example, five repositories and a total generation budget of thirty bugs are
+configured as follows:
+
+```yaml
+swesmith:
+  local_repositories:
+    - owner-a__repo-a.1234abcd
+    - owner-b__repo-b.5678efab
+    - owner-c__repo-c.90abcdef
+    - owner-d__repo-d.1357ace0
+    - owner-e__repo-e.2468bdf1
+  local_repository_limit: 5
+  max_bugs: 30
+  task_limit: 30
+```
+
+`max_bugs` is the number of generation attempts to start and is divided as
+evenly as possible across the selected repositories; with the values above,
+each receives six attempts. It is not a success requirement. `task_limit` only
+caps the successful, validated tasks passed onward. Keep
+`required_task_count: null` for best-effort operation, or set it only when a
+strict number of surviving tasks is required. A repository entry can also be a
+mapping with explicit `base_image`, `base_branch`, or `task_repo` overrides.
+
+`tasks/task_production.json` is updated atomically while production runs. It
+contains one logical `attempt_id` per requested attempt and separately tracks
+generation, validation, issue generation, image construction, and selection
+for SWE-agent. Failed attempts do not need a real SWE-smith `instance_id`.
 
 The pipeline does not alter model sampling settings. It sends no temperature,
 top-p, token-limit, or reasoning overrides to the sampler model, and it does

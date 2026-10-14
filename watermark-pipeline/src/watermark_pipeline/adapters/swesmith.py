@@ -9,9 +9,13 @@ import shutil
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
-from watermark_pipeline.config import PipelineConfig, SWESmithConfig
+from watermark_pipeline.config import (
+    LocalRepositoryConfig,
+    PipelineConfig,
+    SWESmithConfig,
+)
 from watermark_pipeline.process import run_command
 
 
@@ -91,7 +95,11 @@ def produce_tasks(config: PipelineConfig, run_dir: Path) -> TaskProductionResult
                     "entrypoint": str(config.swesmith.script),
                     "command": [str(part) for part in _generation_command(config)],
                     "phases": _phase_list(config.swesmith.phases),
-                    "repos": [repo.strip() for repo in config.swesmith.repos.split(",") if repo.strip()],
+                    "repos": [
+                        repo.strip()
+                        for repo in config.swesmith.repos.split(",")
+                        if repo.strip()
+                    ],
                     "language": config.swesmith.language,
                     "modal_volume": config.swesmith.modal_volume,
                     "remote_task_path": config.swesmith.task_remote_path,
@@ -110,7 +118,10 @@ def produce_tasks(config: PipelineConfig, run_dir: Path) -> TaskProductionResult
     elif config.swesmith.task_source == "local_static":
         source = config.swesmith.existing_task_file
         if source is None:
-            raise RuntimeError("swesmith.existing_task_file is required for local_static task generation")
+            raise RuntimeError(
+                "swesmith.existing_task_file is required for local_static "
+                "task generation"
+            )
         raw_tasks = _merge_task_files([source])
         if config.swesmith.task_limit is not None:
             raw_tasks = raw_tasks[: config.swesmith.task_limit]
@@ -124,7 +135,9 @@ def produce_tasks(config: PipelineConfig, run_dir: Path) -> TaskProductionResult
     else:
         source = config.swesmith.existing_task_file
         if source is None:
-            raise RuntimeError("swesmith.existing_task_file is required when generation is disabled")
+            raise RuntimeError(
+                "swesmith.existing_task_file is required when generation is disabled"
+            )
         copied = tasks_dir / source.name
         shutil.copy2(source, copied)
         candidates = [copied]
@@ -147,32 +160,174 @@ def _produce_local_tasks(
     tasks_dir: Path,
 ) -> TaskProductionResult:
     smith = config.swesmith
-    if not smith.local_profile:
-        raise RuntimeError("swesmith.local_profile is required for local_production")
-    if not smith.local_base_image:
-        raise RuntimeError("swesmith.local_base_image is required for local_production")
-    if not smith.local_task_repo:
-        raise RuntimeError("swesmith.local_task_repo is required for local_production")
+    repositories = smith.local_repositories
+    if not repositories:
+        raise RuntimeError(
+            "swesmith.local_repositories is required for local_production"
+        )
+    if not 1 <= smith.local_repository_limit <= len(repositories):
+        raise RuntimeError(
+            "swesmith.local_repository_limit must be between 1 and the number "
+            f"of configured repositories ({len(repositories)})"
+        )
+    repositories = repositories[: smith.local_repository_limit]
+    if smith.max_bugs < len(repositories):
+        raise RuntimeError(
+            "swesmith.max_bugs must be at least local_repository_limit so each "
+            "selected repository receives a bug budget"
+        )
+    required_count = smith.required_task_count
+    if (
+        required_count is not None
+        and smith.task_limit is not None
+        and smith.task_limit < required_count
+    ):
+        raise RuntimeError(
+            "swesmith.task_limit cannot be smaller than required_task_count: "
+            f"task_limit={smith.task_limit}, required={required_count}"
+        )
     if smith.local_issue_mode not in {"static", "llm"}:
         raise RuntimeError(
             "Unsupported swesmith.local_issue_mode: "
             f"{smith.local_issue_mode} (expected 'static' or 'llm')"
         )
 
-    bug_dir = smith.project_dir / "logs" / "bug_gen" / smith.local_profile
-    before_ids = _bug_artifact_ids(bug_dir, smith.local_profile)
-    generation_command = _local_generation_command(config, run_dir)
+    bug_budgets = _distribute_budget(smith.max_bugs, len(repositories))
+    task_groups: list[list[dict[str, Any]]] = []
+    evidence_path = tasks_dir / "task_production.json"
+    evidence_payload: dict[str, Any] = {
+        "producer": "SWE-smith",
+        "mode": "local_production",
+        "status": "running",
+        "generator": smith.local_generator,
+        "local_issue_mode": smith.local_issue_mode,
+        "repository_limit": smith.local_repository_limit,
+        "planned_bug_attempts": smith.max_bugs,
+        "required_task_count": required_count,
+        "selected_instance_ids": [],
+        "repositories": [],
+    }
+    _write_production_evidence(evidence_path, evidence_payload)
+    for repository, bug_budget in zip(repositories, bug_budgets, strict=True):
+        repository_evidence = _new_repository_evidence(repository, bug_budget)
+        evidence_payload["repositories"].append(repository_evidence)
+        _write_production_evidence(evidence_path, evidence_payload)
+
+        def persist_evidence() -> None:
+            _write_production_evidence(evidence_path, evidence_payload)
+
+        try:
+            tasks = _produce_local_repository_tasks(
+                config,
+                run_dir,
+                tasks_dir,
+                repository,
+                bug_budget,
+                repository_evidence,
+                persist_evidence,
+            )
+        except Exception as error:
+            LOGGER.exception(
+                "Local SWE-smith production failed for %s",
+                repository.profile,
+            )
+            task_groups.append([])
+            repository_evidence["status"] = "failed"
+            repository_evidence["error"] = f"{type(error).__name__}: {error}"
+            _fail_started_attempt_stages(repository_evidence)
+        else:
+            task_groups.append(tasks)
+            repository_evidence["status"] = (
+                "completed_with_failures"
+                if _repository_has_failures(repository_evidence)
+                else "succeeded"
+            )
+        _write_production_evidence(evidence_path, evidence_payload)
+
+    produced_tasks = _round_robin(task_groups)
+    if smith.task_limit is not None:
+        produced_tasks = produced_tasks[: smith.task_limit]
+    selected_count = required_count if required_count is not None else len(produced_tasks)
+    produced_tasks = produced_tasks[:selected_count]
+    selected_ids = {str(task["instance_id"]) for task in produced_tasks}
+    for repository_evidence in evidence_payload["repositories"]:
+        for attempt in repository_evidence["attempts"]:
+            attempt["selected_for_agent"] = (
+                attempt.get("artifact_instance_id") in selected_ids
+            )
+
+    merged_path = tasks_dir / "tasks.json"
+    _write_tasks(merged_path, produced_tasks)
+    evidence_payload["selected_instance_ids"] = sorted(selected_ids)
+    if required_count is not None and len(produced_tasks) < required_count:
+        evidence_payload["status"] = "failed"
+        _write_production_evidence(evidence_path, evidence_payload)
+        raise RuntimeError(
+            "SWE-smith multi-repository production yielded fewer tasks than required: "
+            f"required={required_count}, produced={len(produced_tasks)}; "
+            f"see {evidence_path}"
+        )
+    if not produced_tasks:
+        evidence_payload["status"] = "failed"
+        _write_production_evidence(evidence_path, evidence_payload)
+        raise RuntimeError(
+            "SWE-smith multi-repository production yielded no eligible task; "
+            f"see {evidence_path}"
+        )
+    evidence_payload["status"] = (
+        "completed_with_failures"
+        if any(
+            repository["status"] != "succeeded"
+            for repository in evidence_payload["repositories"]
+        )
+        else "succeeded"
+    )
+    _write_production_evidence(evidence_path, evidence_payload)
+    return TaskProductionResult(task_file=merged_path, evidence_file=evidence_path)
+
+
+def _produce_local_repository_tasks(
+    config: PipelineConfig,
+    run_dir: Path,
+    tasks_dir: Path,
+    repository: LocalRepositoryConfig,
+    bug_budget: int,
+    evidence: dict[str, Any],
+    persist_evidence: Callable[[], None],
+) -> list[dict[str, Any]]:
+    smith = config.swesmith
+    repository_dir = tasks_dir / "repositories" / _slug(repository.profile)
+    repository_dir.mkdir(parents=True, exist_ok=True)
+    bug_dir = smith.project_dir / "logs" / "bug_gen" / repository.profile
+    before_ids = _bug_artifact_ids(bug_dir, repository.profile)
+    generation_command = _local_generation_command(
+        config,
+        run_dir,
+        repository,
+        bug_budget,
+    )
     generation_env = dict(os.environ)
     generation_env["SWEFT_DOTENV_PATH"] = str(config.workspace_root / ".env")
-    run_command(
-        generation_command,
-        cwd=smith.project_dir,
-        env=generation_env,
-    )
+    evidence["generation_command"] = [str(part) for part in generation_command]
+    evidence["status"] = "running"
+    for attempt in evidence["attempts"]:
+        attempt["generation"] = "started"
+    persist_evidence()
+    run_command(generation_command, cwd=smith.project_dir, env=generation_env)
 
-    after_ids = _bug_artifact_ids(bug_dir, smith.local_profile)
+    after_ids = _bug_artifact_ids(bug_dir, repository.profile)
     new_ids = sorted(after_ids - before_ids)
-    if not new_ids:
+    tracked_new_ids = new_ids[:bug_budget]
+    for attempt, instance_id in zip(evidence["attempts"], tracked_new_ids):
+        attempt["generation"] = "succeeded"
+        attempt["artifact_instance_id"] = instance_id
+    for attempt in evidence["attempts"][len(tracked_new_ids) :]:
+        attempt["generation"] = "failed"
+    evidence["untracked_generated_instance_ids"] = new_ids[bug_budget:]
+    evidence["bug_instances_before"] = len(before_ids)
+    evidence["bug_instances_after"] = len(after_ids)
+    persist_evidence()
+    if not tracked_new_ids:
         raise RuntimeError(
             "SWE-smith local generation produced no new bug artifacts; "
             "refusing to reuse historical candidates"
@@ -182,24 +337,26 @@ def _produce_local_tasks(
         sys.executable,
         "-m",
         "swesmith.bug_gen.collect_patches",
-        Path("logs") / "bug_gen" / smith.local_profile,
+        Path("logs") / "bug_gen" / repository.profile,
     ]
+    evidence["collect_command"] = [str(part) for part in collect_command]
     run_command(collect_command, cwd=smith.project_dir)
     collected_path = (
         smith.project_dir
         / "logs"
         / "bug_gen"
-        / f"{smith.local_profile}_all_patches.json"
+        / f"{repository.profile}_all_patches.json"
     )
+    new_id_set = set(tracked_new_ids)
     candidates = [
         item
         for item in _read_json_list(collected_path)
-        if str(item.get("instance_id", "")) in set(new_ids)
+        if str(item.get("instance_id", "")) in new_id_set
     ]
     if not candidates:
         raise RuntimeError("SWE-smith did not collect any newly generated bug patches")
 
-    candidate_path = tasks_dir / "local_candidates.json"
+    candidate_path = repository_dir / "local_candidates.json"
     _write_tasks(candidate_path, candidates)
     validation_command: list[str | Path] = [
         sys.executable,
@@ -209,96 +366,107 @@ def _produce_local_tasks(
         "--workers",
         str(smith.local_validation_workers),
     ]
+    evidence["validation_command"] = [str(part) for part in validation_command]
+    for attempt in evidence["attempts"]:
+        if attempt["generation"] == "succeeded":
+            attempt["validation"] = "started"
+    persist_evidence()
     run_command(
         validation_command,
         cwd=smith.project_dir,
-        group_wrapper=config.sweagent.docker_group if config.sweagent.docker_group_wrapper else None,
+        group_wrapper=(
+            config.sweagent.docker_group
+            if config.sweagent.docker_group_wrapper
+            else None
+        ),
     )
 
-    valid_tasks = _collect_locally_validated_tasks(config, candidates)
-    required_count = smith.required_task_count
-    if required_count is not None and len(valid_tasks) < required_count:
-        raise RuntimeError(
-            "SWE-smith local validation yielded fewer tasks than required: "
-            f"required={required_count}, valid={len(valid_tasks)}"
-        )
-    if smith.task_limit is not None:
-        valid_tasks = valid_tasks[: smith.task_limit]
-    if required_count is not None:
-        valid_tasks = valid_tasks[:required_count]
+    valid_tasks = _collect_locally_validated_tasks(
+        config,
+        repository,
+        candidates,
+    )
+    valid_ids = {str(task["instance_id"]) for task in valid_tasks}
+    for attempt in evidence["attempts"]:
+        if attempt["validation"] == "started":
+            attempt["validation"] = (
+                "succeeded"
+                if attempt.get("artifact_instance_id") in valid_ids
+                else "failed"
+            )
+    persist_evidence()
     if not valid_tasks:
         raise RuntimeError("SWE-smith local validation yielded no eligible task")
 
-    image_name, image_command = _build_local_task_image(config, run_dir, valid_tasks)
-    for task in valid_tasks:
-        task["image_name"] = image_name
-
-    gathered_path = tasks_dir / "local_gathered_tasks.json"
+    gathered_path = repository_dir / "local_gathered_tasks.json"
     _write_tasks(gathered_path, valid_tasks)
     issue_command = _local_issue_command(config, gathered_path)
-    run_command(
-        issue_command,
-        cwd=smith.project_dir,
-        env=generation_env,
-    )
+    evidence["issue_command"] = [str(part) for part in issue_command]
+    for attempt in evidence["attempts"]:
+        if attempt["validation"] == "succeeded":
+            attempt["issue_generation"] = "started"
+    persist_evidence()
+    run_command(issue_command, cwd=smith.project_dir, env=generation_env)
     issue_path = _local_issue_output_path(smith, gathered_path)
     produced_tasks = _read_json_list(issue_path)
+    produced_ids = {str(task["instance_id"]) for task in produced_tasks}
+    for attempt in evidence["attempts"]:
+        if attempt["issue_generation"] == "started":
+            attempt["issue_generation"] = (
+                "succeeded"
+                if attempt.get("artifact_instance_id") in produced_ids
+                else "failed"
+            )
+    persist_evidence()
     if not produced_tasks:
         raise RuntimeError("SWE-smith issue generation did not produce any task instance")
-    if required_count is not None and len(produced_tasks) < required_count:
-        raise RuntimeError(
-            "SWE-smith issue generation yielded fewer tasks than required: "
-            f"required={required_count}, produced={len(produced_tasks)}"
-        )
     if len(produced_tasks) != len(valid_tasks):
         LOGGER.warning(
-            "SWE-smith issue generation kept %d of %d task instances",
+            "SWE-smith issue generation kept %d of %d task instances for %s",
             len(produced_tasks),
             len(valid_tasks),
+            repository.profile,
         )
+    for attempt in evidence["attempts"]:
+        if attempt["issue_generation"] == "succeeded":
+            attempt["image_build"] = "started"
+    persist_evidence()
+    image_name, image_command = _build_local_task_image(
+        config,
+        run_dir,
+        repository,
+        produced_tasks,
+    )
+    evidence["local_image_command"] = [str(part) for part in image_command]
+    evidence["local_image"] = image_name
+    for task in produced_tasks:
+        task["image_name"] = image_name
+    for attempt in evidence["attempts"]:
+        if attempt["issue_generation"] == "succeeded":
+            attempt["image_build"] = "succeeded"
+    persist_evidence()
     if not all(_is_task(task, require_problem_statement=True) for task in produced_tasks):
         raise RuntimeError("SWE-smith local issue output contains incomplete tasks")
 
-    merged_path = tasks_dir / "tasks.json"
-    _write_tasks(merged_path, produced_tasks)
-    evidence_path = tasks_dir / "task_production.json"
-    evidence_path.write_text(
-        json.dumps(
-            {
-                "producer": "SWE-smith",
-                "mode": "local_production",
-                "profile": smith.local_profile,
-                "generator": smith.local_generator,
-                "local_issue_mode": smith.local_issue_mode,
-                "generation_command": [str(part) for part in generation_command],
-                "collect_command": [str(part) for part in collect_command],
-                "validation_command": [str(part) for part in validation_command],
-                "local_image_command": [str(part) for part in image_command],
-                "issue_command": [str(part) for part in issue_command],
-                "bug_instances_before": len(before_ids),
-                "bug_instances_after": len(after_ids),
-                "new_bug_instance_ids": new_ids,
-                "validated_instance_ids": [str(task["instance_id"]) for task in valid_tasks],
-                "selected_instance_ids": [str(task["instance_id"]) for task in produced_tasks],
-                "local_image": image_name,
-                "required_task_count": required_count,
-            },
-            indent=2,
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
-    return TaskProductionResult(task_file=merged_path, evidence_file=evidence_path)
+    evidence["new_bug_instance_ids"] = tracked_new_ids
+    evidence["validated_instance_ids"] = sorted(valid_ids)
+    evidence["produced_instance_ids"] = sorted(produced_ids)
+    return produced_tasks
 
 
-def _local_generation_command(config: PipelineConfig, run_dir: Path) -> list[str | Path]:
+def _local_generation_command(
+    config: PipelineConfig,
+    run_dir: Path,
+    repository: LocalRepositoryConfig,
+    bug_budget: int,
+) -> list[str | Path]:
     smith = config.swesmith
     if smith.local_generator == "lm_modify":
         return [
             sys.executable,
             "-m",
             "swesmith.bug_gen.llm.modify",
-            smith.local_profile,
+            repository.profile,
             "--config_file",
             smith.local_generator_config,
             "--model",
@@ -306,22 +474,23 @@ def _local_generation_command(config: PipelineConfig, run_dir: Path) -> list[str
             "--n_bugs",
             "1",
             "--max_bugs",
-            str(smith.max_bugs),
+            str(bug_budget),
             "--n_workers",
             str(smith.local_generation_workers),
         ]
     if smith.local_generator == "procedural":
-        seed = sum(run_dir.name.encode("utf-8")) % (2**31)
+        seed_material = f"{run_dir.name}:{repository.profile}"
+        seed = sum(seed_material.encode("utf-8")) % (2**31)
         return [
             sys.executable,
             "-m",
             "swesmith.bug_gen.procedural.generate",
-            smith.local_profile,
+            repository.profile,
             "--max_bugs",
-            str(smith.max_bugs),
+            str(bug_budget),
             "--interleave",
             "--max_candidates",
-            str(smith.max_bugs),
+            str(bug_budget),
             "--seed",
             str(seed),
         ]
@@ -365,10 +534,13 @@ def _bug_artifact_ids(root: Path, profile: str) -> set[str]:
 
 def _collect_locally_validated_tasks(
     config: PipelineConfig,
+    repository: LocalRepositoryConfig,
     candidates: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     smith = config.swesmith
-    validation_root = smith.project_dir / "logs" / "run_validation" / smith.local_profile
+    validation_root = (
+        smith.project_dir / "logs" / "run_validation" / repository.profile
+    )
     tasks: list[dict[str, Any]] = []
     for candidate in sorted(candidates, key=lambda item: str(item["instance_id"])):
         instance_id = str(candidate["instance_id"])
@@ -385,7 +557,7 @@ def _collect_locally_validated_tasks(
             {
                 **candidate,
                 "instance_id": instance_id,
-                "repo": smith.local_task_repo,
+                "repo": repository.task_repo,
                 "patch": patch_path.read_text(encoding="utf-8"),
                 "FAIL_TO_PASS": fail_to_pass,
                 "PASS_TO_PASS": pass_to_pass,
@@ -397,15 +569,15 @@ def _collect_locally_validated_tasks(
 def _build_local_task_image(
     config: PipelineConfig,
     run_dir: Path,
+    repository: LocalRepositoryConfig,
     tasks: list[dict[str, Any]],
 ) -> tuple[str, list[str | Path]]:
-    smith = config.swesmith
-    build_dir = run_dir / "tasks" / "local_image"
+    build_dir = run_dir / "tasks" / "local_images" / _slug(repository.profile)
     staging_dir = build_dir / "staging"
     staging_dir.mkdir(parents=True, exist_ok=True)
 
     docker_lines = [
-        f"FROM {smith.local_base_image}",
+        f"FROM {repository.base_image}",
         "COPY staging /staging",
         "RUN set -eu; cd /testbed; "
         "git config user.email 'swesmith@swesmith.ai'; "
@@ -429,8 +601,8 @@ def _build_local_task_image(
         commands = [
             "set -eu",
             "cd /testbed",
-            f"git checkout {shlex.quote(smith.local_base_branch)}",
-            f"git reset --hard {shlex.quote(smith.local_base_branch)}",
+            f"git checkout {shlex.quote(repository.base_branch)}",
+            f"git reset --hard {shlex.quote(repository.base_branch)}",
             "git clean -fdq",
             f"git checkout -b {shlex.quote(instance_id)}",
             f"git apply {shlex.quote(f'/staging/{instance_id}/patch.diff')}",
@@ -448,26 +620,133 @@ def _build_local_task_image(
         docker_lines.append("RUN " + "; ".join(commands))
     docker_lines.append(
         "RUN set -eu; cd /testbed; "
-        f"git checkout {shlex.quote(smith.local_base_branch)}; "
-        f"git reset --hard {shlex.quote(smith.local_base_branch)}; git clean -fdq"
+        f"git checkout {shlex.quote(repository.base_branch)}; "
+        f"git reset --hard {shlex.quote(repository.base_branch)}; git clean -fdq"
     )
     (build_dir / "Dockerfile").write_text(
         "\n".join(docker_lines) + "\n",
         encoding="utf-8",
     )
 
-    base_repository = smith.local_base_image
+    base_repository = repository.base_image
     if ":" in base_repository.rsplit("/", 1)[-1]:
         base_repository = base_repository.rsplit(":", 1)[0]
     run_slug = re.sub(r"[^a-z0-9_.-]+", "-", run_dir.name.lower()).strip("-.")
-    image_name = f"{base_repository}:{smith.local_image_tag_prefix}-{run_slug}"
+    profile_slug = _slug(repository.profile)
+    image_name = (
+        f"{base_repository}:{config.swesmith.local_image_tag_prefix}-"
+        f"{run_slug}-{profile_slug}"
+    )
     command: list[str | Path] = ["docker", "build", "-t", image_name, build_dir]
     run_command(
         command,
         cwd=config.workspace_root,
-        group_wrapper=config.sweagent.docker_group if config.sweagent.docker_group_wrapper else None,
+        group_wrapper=(
+            config.sweagent.docker_group
+            if config.sweagent.docker_group_wrapper
+            else None
+        ),
     )
     return image_name, command
+
+
+def _distribute_budget(total: int, count: int) -> list[int]:
+    base, remainder = divmod(total, count)
+    return [base + (1 if index < remainder else 0) for index in range(count)]
+
+
+def _new_repository_evidence(
+    repository: LocalRepositoryConfig,
+    bug_budget: int,
+) -> dict[str, Any]:
+    profile_slug = _slug(repository.profile)
+    return {
+        "profile": repository.profile,
+        "base_image": repository.base_image,
+        "base_branch": repository.base_branch,
+        "task_repo": repository.task_repo,
+        "planned_bug_attempts": bug_budget,
+        "status": "scheduled",
+        "attempts": [
+            {
+                "attempt_id": f"{profile_slug}:bug-{index:04d}",
+                "generation": "scheduled",
+                "validation": "not_started",
+                "issue_generation": "not_started",
+                "image_build": "not_started",
+                "selected_for_agent": False,
+            }
+            for index in range(1, bug_budget + 1)
+        ],
+    }
+
+
+def _fail_started_attempt_stages(repository_evidence: dict[str, Any]) -> None:
+    for attempt in repository_evidence["attempts"]:
+        for stage in (
+            "generation",
+            "validation",
+            "issue_generation",
+            "image_build",
+        ):
+            if attempt[stage] == "started":
+                attempt[stage] = "failed"
+
+
+def _repository_has_failures(repository_evidence: dict[str, Any]) -> bool:
+    return any(
+        "failed"
+        in {
+            attempt["generation"],
+            attempt["validation"],
+            attempt["issue_generation"],
+            attempt["image_build"],
+        }
+        for attempt in repository_evidence["attempts"]
+    )
+
+
+def _write_production_evidence(path: Path, payload: dict[str, Any]) -> None:
+    attempts = [
+        attempt
+        for repository in payload["repositories"]
+        for attempt in repository["attempts"]
+    ]
+    payload["summary"] = {
+        "planned": payload["planned_bug_attempts"],
+        "started": sum(attempt["generation"] != "scheduled" for attempt in attempts),
+        "generated": sum(attempt["generation"] == "succeeded" for attempt in attempts),
+        "validated": sum(attempt["validation"] == "succeeded" for attempt in attempts),
+        "issue_generated": sum(
+            attempt["issue_generation"] == "succeeded" for attempt in attempts
+        ),
+        "image_ready": sum(
+            attempt["image_build"] == "succeeded" for attempt in attempts
+        ),
+        "selected_for_agent": sum(
+            bool(attempt["selected_for_agent"]) for attempt in attempts
+        ),
+    }
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(
+        json.dumps(payload, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    temporary.replace(path)
+
+
+def _round_robin(groups: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    max_size = max((len(group) for group in groups), default=0)
+    for index in range(max_size):
+        for group in groups:
+            if index < len(group):
+                merged.append(group[index])
+    return merged
+
+
+def _slug(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]+", "-", value).strip("-.")
 
 
 def _safe_relative_path(value: str) -> bool:

@@ -16,6 +16,14 @@ class RunConfig:
 
 
 @dataclass(frozen=True)
+class LocalRepositoryConfig:
+    profile: str
+    base_image: str
+    base_branch: str
+    task_repo: str
+
+
+@dataclass(frozen=True)
 class SWESmithConfig:
     task_source: str
     enabled: bool
@@ -34,15 +42,13 @@ class SWESmithConfig:
     task_limit: int | None
     required_task_count: int | None
     existing_task_file: Path | None
-    local_profile: str
+    local_repositories: tuple[LocalRepositoryConfig, ...]
+    local_repository_limit: int
     local_generator: str
     local_generator_config: str
     local_generator_model: str
     local_generation_workers: int
     local_validation_workers: int
-    local_base_image: str
-    local_base_branch: str
-    local_task_repo: str
     local_issue_mode: str
     local_image_tag_prefix: str
 
@@ -108,6 +114,7 @@ class PipelineConfig:
         agent = raw["sweagent"]
         sampler = raw["sampler"]
         export = raw.get("export", {})
+        local_repositories = _parse_local_repositories(smith)
 
         existing_task = smith.get("existing_task_file")
         return cls(
@@ -118,7 +125,12 @@ class PipelineConfig:
                 resume=bool(run.get("resume", True)),
             ),
             swesmith=SWESmithConfig(
-                task_source=str(smith.get("task_source", "modal" if smith.get("enabled", False) else "existing")),
+                task_source=str(
+                    smith.get(
+                        "task_source",
+                        "modal" if smith.get("enabled", False) else "existing",
+                    )
+                ),
                 enabled=bool(smith.get("enabled", False)),
                 project_dir=_resolve(workspace_root, smith["project_dir"]),
                 modal_executable=_resolve(
@@ -136,7 +148,11 @@ class PipelineConfig:
                 modal_volume=str(smith.get("modal_volume", "swesmith-bug-gen")),
                 task_remote_path=str(smith.get("task_remote_path", "python/task_insts")),
                 task_file_glob=str(smith.get("task_file_glob", "**/*__ig_llm.json")),
-                task_limit=(int(smith["task_limit"]) if smith.get("task_limit") is not None else None),
+                task_limit=(
+                    int(smith["task_limit"])
+                    if smith.get("task_limit") is not None
+                    else None
+                ),
                 required_task_count=(
                     int(smith["required_task_count"])
                     if smith.get("required_task_count") is not None
@@ -145,7 +161,10 @@ class PipelineConfig:
                 existing_task_file=(
                     _resolve(workspace_root, existing_task) if existing_task else None
                 ),
-                local_profile=str(smith.get("local_profile", "")),
+                local_repositories=local_repositories,
+                local_repository_limit=int(
+                    smith.get("local_repository_limit", len(local_repositories))
+                ),
                 local_generator=str(smith.get("local_generator", "procedural")),
                 local_generator_config=str(
                     smith.get("local_generator_config", "configs/bug_gen/lm_modify.yml")
@@ -155,9 +174,6 @@ class PipelineConfig:
                 ),
                 local_generation_workers=int(smith.get("local_generation_workers", 1)),
                 local_validation_workers=int(smith.get("local_validation_workers", 4)),
-                local_base_image=str(smith.get("local_base_image", "")),
-                local_base_branch=str(smith.get("local_base_branch", "main")),
-                local_task_repo=str(smith.get("local_task_repo", "")),
                 local_issue_mode=str(smith.get("local_issue_mode", "static")),
                 local_image_tag_prefix=str(
                     smith.get("local_image_tag_prefix", "wm-local")
@@ -210,3 +226,78 @@ def _expand_environment(value: Any) -> Any:
     if isinstance(value, str):
         return os.path.expandvars(value)
     return value
+
+
+def _parse_local_repositories(smith: dict[str, Any]) -> tuple[LocalRepositoryConfig, ...]:
+    raw_repositories = smith.get("local_repositories")
+    if raw_repositories is None:
+        profile = str(smith.get("local_profile", ""))
+        if not profile:
+            return ()
+        raw_repositories = [
+            {
+                "profile": profile,
+                "base_image": smith.get("local_base_image", ""),
+                "base_branch": smith.get("local_base_branch", "main"),
+                "task_repo": smith.get("local_task_repo", ""),
+            }
+        ]
+    if not isinstance(raw_repositories, list):
+        raise RuntimeError("swesmith.local_repositories must be a list")
+
+    repositories: list[LocalRepositoryConfig] = []
+    for index, raw_repository in enumerate(raw_repositories):
+        if isinstance(raw_repository, str):
+            values: dict[str, Any] = {"profile": raw_repository}
+        elif isinstance(raw_repository, dict):
+            values = raw_repository
+        else:
+            raise RuntimeError(
+                f"swesmith.local_repositories[{index}] must be a string or mapping"
+            )
+        profile = str(values.get("profile", "")).strip()
+        if not profile:
+            raise RuntimeError(
+                f"swesmith.local_repositories[{index}] has no profile"
+            )
+        default_image, default_task_repo = _local_repository_defaults(profile)
+        base_branch = str(values.get("base_branch", "main")).strip()
+        if not base_branch:
+            raise RuntimeError(
+                f"swesmith.local_repositories[{index}] has no base_branch"
+            )
+        repositories.append(
+            LocalRepositoryConfig(
+                profile=profile,
+                base_image=str(values.get("base_image") or default_image),
+                base_branch=base_branch,
+                task_repo=str(values.get("task_repo") or default_task_repo),
+            )
+        )
+    profiles = [repository.profile for repository in repositories]
+    if len(set(profiles)) != len(profiles):
+        raise RuntimeError("swesmith.local_repositories contains duplicate profiles")
+    return tuple(repositories)
+
+
+def _local_repository_defaults(profile: str) -> tuple[str, str]:
+    try:
+        owner, repository_revision = profile.split("__", 1)
+        repository, revision = repository_revision.rsplit(".", 1)
+    except ValueError as error:
+        raise RuntimeError(
+            "Local SWE-smith profile must use owner__repository.revision format: "
+            f"{profile!r}"
+        ) from error
+    if (
+        not owner
+        or not repository
+        or len(revision) != 8
+        or any(character not in "0123456789abcdefABCDEF" for character in revision)
+    ):
+        raise RuntimeError(f"Invalid local SWE-smith profile: {profile!r}")
+    image = (
+        "swebench/swesmith.x86_64."
+        f"{owner}_1776_{repository}.{revision}"
+    ).lower()
+    return image, f"swesmith/{profile}"
