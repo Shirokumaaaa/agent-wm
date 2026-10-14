@@ -122,7 +122,13 @@ class PipelineRunner:
                 decisions.append(self._sample_task(task, trajectory_root, sampler))
             decision_file.write_text(
                 __import__("json").dumps(
-                    [decision.to_dict(algorithm=ALGORITHM, key_id=self.config.sampler.key_id) for decision in decisions],
+                    [
+                        decision.to_dict(
+                            algorithm=ALGORITHM,
+                            key_id=self.config.sampler.key_id,
+                        )
+                        for decision in decisions
+                    ],
                     indent=2,
                     ensure_ascii=False,
                 ),
@@ -148,7 +154,6 @@ class PipelineRunner:
                 instance_id=instance_id,
                 problem_statement=problem_statement,
                 source_trajectory="",
-                original_terminal_response="",
                 decision="ineligible",
                 reason="trajectory_not_found",
             )
@@ -161,13 +166,12 @@ class PipelineRunner:
                 instance_id=instance_id,
                 problem_statement=problem_statement,
                 source_trajectory=source,
-                original_terminal_response="",
                 decision="ineligible",
                 reason=error.reason,
             )
 
         try:
-            candidate, attempts, task_sro, original_sro, sampled_sro = sampler.sample(
+            candidate, attempts, task_sro, sampled_response_sro = sampler.sample(
                 problem_statement=problem_statement,
                 original_response=terminal.response,
             )
@@ -177,7 +181,6 @@ class PipelineRunner:
                 instance_id=instance_id,
                 problem_statement=problem_statement,
                 source_trajectory=source,
-                original_terminal_response=terminal.response,
                 decision="error",
                 reason=type(error).__name__,
             )
@@ -187,17 +190,22 @@ class PipelineRunner:
                 instance_id=instance_id,
                 problem_statement=problem_statement,
                 source_trajectory=source,
-                original_terminal_response=terminal.response,
                 decision="rejected",
                 reason="max_attempts",
                 attempts=attempts,
                 task_sro=task_sro,
-                original_response_sro=original_sro,
             )
+        if sampled_response_sro is None:
+            raise RuntimeError("Accepted candidate is missing its canonical response SRO")
 
         derived_path: str | None = None
         if self.config.export.write_derived_trajectory:
-            destination = self.run_dir / "derived_trajectories" / instance_id / f"{instance_id}.traj"
+            destination = (
+                self.run_dir
+                / "derived_trajectories"
+                / instance_id
+                / f"{instance_id}.traj"
+            )
             write_derived_trajectory(terminal, candidate, destination)
             derived_path = str(destination.relative_to(self.run_dir))
 
@@ -205,14 +213,13 @@ class PipelineRunner:
             instance_id=instance_id,
             problem_statement=problem_statement,
             source_trajectory=source,
-            original_terminal_response=terminal.response,
             sampled_terminal_response=candidate,
+            sampled_compressed_sentence=sampled_response_sro.compressed_sentence,
             decision="accepted",
             reason="watermark_match",
             attempts=attempts,
             task_sro=task_sro,
-            original_response_sro=original_sro,
-            sampled_response_sro=sampled_sro,
+            sampled_response_sro=sampled_response_sro.primary_sro(),
             derived_trajectory=derived_path,
         )
 
@@ -266,13 +273,12 @@ def _decision_from_dict(data: dict) -> SamplingDecision:
         instance_id=data["instance_id"],
         problem_statement=data["problem_statement"],
         source_trajectory=data["source_trajectory"],
-        original_terminal_response=data["original_terminal_response"],
         sampled_terminal_response=data.get("sampled_terminal_response"),
+        sampled_compressed_sentence=data.get("sampled_compressed_sentence"),
         decision=sampling["decision"],
         reason=sampling["reason"],
         attempts=int(sampling.get("attempts", 0)),
         task_sro=sro("task_sro"),
-        original_response_sro=sro("original_response_sro"),
         sampled_response_sro=sro("sampled_response_sro"),
         derived_trajectory=data.get("derived_trajectory"),
     )

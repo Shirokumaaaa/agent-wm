@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from watermark_pipeline.config import SamplerConfig
-from watermark_pipeline.schemas import SRO
+from watermark_pipeline.schemas import ResponseSRO, SRO
 from watermark_pipeline.watermark.candidate import CandidateGenerator
 from watermark_pipeline.watermark.predicate import WatermarkPredicate
 from watermark_pipeline.watermark.sro import SROExtractor
@@ -25,9 +25,9 @@ class RejectionSampler:
         *,
         problem_statement: str,
         original_response: str,
-    ) -> tuple[str | None, int, SRO, SRO, SRO | None]:
+    ) -> tuple[str | None, int, SRO, ResponseSRO | None]:
         task_sro = self.extractor.from_task(problem_statement)
-        original_sro = self.extractor.from_response(original_response)
+        rewrite_reference = self.extractor.from_response(original_response)
         attempts = 0
         round_index = 0
 
@@ -38,20 +38,22 @@ class RejectionSampler:
                 problem_statement=problem_statement,
                 original_response=original_response,
                 task_sro=task_sro,
-                response_sro=original_sro,
+                response_sro=rewrite_reference.primary_sro(),
                 round_index=round_index,
                 candidate_count=count,
             )
             for candidate in candidates[:count]:
                 attempts += 1
-                sampled_sro = self.extractor.from_response(candidate)
+                sampled_response_sro = self.extractor.from_response(candidate)
+                if not sampled_response_sro.has_primary_sro():
+                    continue
                 if self.predicate.accepts(
                     task_sro=task_sro,
-                    response_sro=sampled_sro,
+                    response_sro=sampled_response_sro.primary_sro(),
                 ):
-                    return candidate, attempts, task_sro, original_sro, sampled_sro
+                    return candidate, attempts, task_sro, sampled_response_sro
             round_index += 1
             if not candidates:
                 attempts += count
 
-        return None, attempts, task_sro, original_sro, None
+        return None, attempts, task_sro, None

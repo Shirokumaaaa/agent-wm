@@ -6,7 +6,7 @@ import hmac
 from watermark_pipeline.schemas import SRO
 
 
-ALGORITHM = "semantic-sro-watermark-hmac-v3"
+ALGORITHM = "canonical-response-sro-watermark-hmac-v4"
 
 _CODE_DOMAIN = b"watermark-code-v1"
 _TASK_DOMAIN = b"task-sro-index-v1"
