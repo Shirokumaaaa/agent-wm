@@ -311,7 +311,7 @@ def process_single_instance(
         )
 
         if len(patch_files) == 0:
-            return {"status": "recover_fail"}
+            return "recover_fail"
         else:
             patch_merged = apply_patches(repo, patch_files)
             if patch_merged:
@@ -343,8 +343,12 @@ def init_worker():
     os.makedirs(worker_tempdirs[this_worker_id], exist_ok=True)
 
 
-def sweb_inst_to_rp(inst: dict) -> RepoProfile:
+def sweb_inst_to_rp(
+    inst: dict, profile_map: dict[str, str] | None = None
+) -> RepoProfile:
     owner, repo = inst["repo"].split("/")
+    if profile_map and inst["repo"] in profile_map:
+        return registry.get(profile_map[inst["repo"]])
     rps = [x for x in registry.values() if x.owner == owner and x.repo == repo]
     if len(rps) == 0:
         raise ValueError(
@@ -369,6 +373,7 @@ def main(
     max_files: int = 8,
     max_lines: int = 500,
     max_file_lines: int = 10000,
+    profile_map: str | None = None,
 ):
     global worker_tempdirs, this_worker_id
 
@@ -376,6 +381,9 @@ def main(
         "Cannot redo existing and skipped at the same time"
     )
 
+    resolved_profile_map = (
+        json.load(open(profile_map)) if profile_map is not None else None
+    )
     all_instances = []
     seen_repo_inst_ids = set()
 
@@ -389,7 +397,7 @@ def main(
                 f"Invalid file format for {sweb_insts_file}. Must be .json or .jsonl"
             )
         for inst in file_instances:
-            inst[MIRROR_PR] = sweb_inst_to_rp(inst).repo_name
+            inst[MIRROR_PR] = sweb_inst_to_rp(inst, resolved_profile_map).repo_name
             repo_inst_id = (inst[MIRROR_PR], inst[KEY_INSTANCE_ID])
             if repo_inst_id in seen_repo_inst_ids:
                 raise ValueError(f"Duplicate instance ID: {inst[KEY_INSTANCE_ID]}")
@@ -570,6 +578,10 @@ if __name__ == "__main__":
         type=int,
         default=10000,
         help="Maximum lines in a single changed file for recovery attempt (default: 10000)",
+    )
+    parser.add_argument(
+        "--profile-map",
+        help="JSON mapping from owner/repository names to exact SWE-smith profile IDs.",
     )
     args = parser.parse_args()
     main(**vars(args))

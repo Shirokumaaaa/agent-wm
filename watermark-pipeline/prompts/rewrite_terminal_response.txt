@@ -3,7 +3,15 @@ Rewrite a terminal response for a completed software-engineering task.
 The response must preserve the same implemented change and factual claims. It
 must remain concise and developer-facing. Do not add a patch, tool call,
 command, watermark explanation, or facts that are not present in the original
-response. Return JSON only, with this shape:
+response.
+
+Identifier preservation (hard requirement): every file name, class name,
+function name, method name, variable name, and test name that appears in the
+original response must appear verbatim in your rewrite. You may reorder
+clauses, drop redundant prose, and shorten explanations, but you must not
+delete, rename, abbreviate, or paraphrase any identifier.
+
+Return JSON only, with this shape:
 {"candidates": ["candidate 1", "candidate 2"]}
 
 Generate exactly {{candidate_count}} distinct candidates. This is rewrite

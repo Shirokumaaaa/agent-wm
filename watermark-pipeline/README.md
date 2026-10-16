@@ -39,6 +39,41 @@ single-line JSONL records.
 modes are retained only for explicitly requested replay/debug runs; they do not
 constitute new task production.
 
+## SWE-smith generation plans
+
+Local production supports all SWE-smith bug-generation families through a typed
+generation plan:
+
+- Direct generators: `lm_modify`, `lm_rewrite`, `procedural`, and `mirror`.
+- Validated-patch combiners: `combine_file` and `combine_module`.
+
+Direct generators run first and their run-owned artifacts are validated. Combiners
+then receive an explicit allowlist containing only validated artifacts from their
+configured `sources`; combined patches are collected and validated a second time.
+Historical files already present below `SWE-smith/logs/bug_gen` are never silently
+adopted by a new run.
+
+The complete schema is demonstrated in
+`configs/all_generators.example.yaml`. The original `local_generator`,
+`local_generator_config`, `local_generator_model`, and
+`local_generation_workers` fields remain supported and are converted to a
+single-generator plan when `generators` is absent.
+
+Each generator has its own global `budget`, distributed across the selected local
+repositories. `task_limit` remains the final cap after validation and issue
+generation. A mirror input is a SWE-bench-style JSON or JSONL file; records are
+grouped by repository and a run-scoped exact profile map prevents interactive
+revision selection. Repositories with no matching mirror input are skipped for
+that mirror job. Mirror tasks can retain their original PR issue text with
+`mirror_issue_mode: original_pr` and use `mirror_issue_fallback: llm` or `static`
+when the original text is unavailable.
+
+The upstream capability boundaries still apply: PR mirror recovery currently
+rewrites Python files, and the module combiner's path grouping is Python-oriented.
+
+Production evidence now records generator/combiner jobs, exact commands, artifact
+producer IDs, validation state, and parent artifact IDs for combined patches.
+
 For example, five repositories and a total generation budget of thirty bugs are
 configured as follows:
 
@@ -79,6 +114,15 @@ Run from the repository root with the existing virtual environment:
 ```bash
 .venv/bin/python watermark-pipeline/run.py \
   --config watermark-pipeline/configs/pipeline.yaml
+```
+
+Validate budgets, referenced files, repository allocation, and dependency wiring
+without starting Docker or making model calls:
+
+```bash
+.venv/bin/python watermark-pipeline/run.py \
+  --config watermark-pipeline/configs/pipeline.yaml \
+  --plan-only
 ```
 
 The launcher adds the project's `src` directory to its own import path, so the

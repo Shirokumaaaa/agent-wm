@@ -1,0 +1,97 @@
+workspace_root: ../..
+
+run:
+  output_root: watermark-pipeline/runs
+  resume: true
+
+swesmith:
+  task_source: local_production
+  enabled: true
+  project_dir: SWE-smith
+  local_repositories:
+    - pallets__markupsafe.620c06c9
+  local_repository_limit: 1
+
+  # Budgets are global per generator and are distributed across the selected repos.
+  generators:
+    - id: modify
+      kind: lm_modify
+      budget: 4
+      config_file: configs/bug_gen/lm_modify.yml
+      model: deepseek/deepseek-flash
+      workers: 1
+    - id: rewrite
+      kind: lm_rewrite
+      budget: 4
+      config_file: configs/bug_gen/lm_rewrite.yml
+      model: deepseek/deepseek-flash
+      workers: 1
+    - id: procedural
+      kind: procedural
+      budget: 4
+    - id: mirror
+      kind: mirror
+      budget: 4
+      # Replace this with a JSON/JSONL SWE-bench-style PR instance file.
+      input_files:
+        - watermark-pipeline/inputs/pr_instances.jsonl
+      model: deepseek/deepseek-flash
+      workers: 1
+      max_files: 8
+      max_lines: 500
+      max_file_lines: 10000
+
+  # Combiners consume only patches validated in this run, then their outputs are
+  # validated again. SWE-smith excludes PR mirrors from combination inputs.
+  combiners:
+    - id: same_file
+      kind: combine_file
+      sources: [modify, rewrite, procedural]
+      num_patches: 2
+      limit: 4
+      max_combos: 100
+    - id: same_module
+      kind: combine_module
+      sources: [modify, rewrite, procedural]
+      num_patches: 2
+      limit: 4
+      max_combos: 100
+      depth: 2
+
+  local_validation_workers: 4
+  local_issue_mode: llm
+  mirror_issue_mode: original_pr
+  mirror_issue_fallback: llm
+  issue_gen_config: watermark-pipeline/configs/issue_gen/ig_deepseek.yaml
+  issue_gen_workers: 4
+  local_image_tag_prefix: wm-local
+  task_limit: 20
+  required_task_count: null
+
+sweagent:
+  executable: .venv/bin/sweagent
+  project_dir: SWE-agent
+  config: SWE-agent/config/swesmith_deepseek_flash.yaml
+  docker_group_wrapper: true
+  docker_group: docker
+  container_proxy_url: http://host.docker.internal:17895
+  startup_timeout: 600
+  num_workers: 1
+
+sampler:
+  model: deepseek/deepseek-flash
+  api_base: https://api.deepseek.com
+  api_key_env: DEEPSEEK_API_KEY
+  watermark: ${WM_WATERMARK}
+  code_key: ${WM_CODE_KEY}
+  task_key: ${WM_TASK_KEY}
+  response_key: ${WM_RESPONSE_KEY}
+  key_id: all-generators-v1
+  max_attempts: 32
+  candidates_per_round: 4
+  code_modulus: 2147483647
+  modulus: 4
+  target: 0
+
+export:
+  write_derived_trajectory: true

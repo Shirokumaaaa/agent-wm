@@ -192,6 +192,11 @@ def _write_runtime_config(
     if config.sweagent.num_workers is not None:
         data["num_workers"] = config.sweagent.num_workers
 
+    if config.sweagent.startup_timeout is not None:
+        data["instances"]["deployment"]["startup_timeout"] = (
+            config.sweagent.startup_timeout
+        )
+
     proxy_url = config.sweagent.container_proxy_url
     if proxy_url:
         docker_args = list(data["instances"]["deployment"].get("docker_args", []))

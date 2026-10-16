@@ -19,16 +19,22 @@ swesmith:
     - profile: marshmallow-code__marshmallow.9716fc62
       base_branch: dev
   local_repository_limit: 5
-  local_generator: lm_modify
-  local_generator_config: configs/bug_gen/lm_modify.yml
-  local_generator_model: deepseek/deepseek-flash
   local_generation_workers: 1
   local_validation_workers: 5
   local_issue_mode: llm
   issue_gen_config: watermark-pipeline/configs/issue_gen/ig_deepseek.yaml
   issue_gen_workers: 4
   local_image_tag_prefix: wm-local
-  # Number of bug-generation attempts to start across selected repositories.
+  # Bug generation is declared as a list of generators. Each generator runs for
+  # every selected repository with its own budget.
+  generators:
+    - id: lm_modify
+      kind: lm_modify
+      budget: 30
+      model: deepseek/deepseek-flash
+      config_file: configs/bug_gen/lm_modify.yml
+      workers: 1
+  # Fallback budget for generators that do not declare one.
   max_bugs: 30
   task_limit: 30
   required_task_count: null
@@ -39,6 +45,8 @@ sweagent:
   config: SWE-agent/config/swesmith_deepseek_flash.yaml
   docker_group_wrapper: true
   docker_group: docker
+  container_proxy_url: http://host.docker.internal:17895
+  startup_timeout: 600
   num_workers: 1
 
 sampler:

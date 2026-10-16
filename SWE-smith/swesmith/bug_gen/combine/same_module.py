@@ -121,6 +121,7 @@ def main(
     limit_per_module: int,
     max_combos: int,
     include_invalid_patches: bool = False,
+    validated_instances_file: str | None = None,
 ):
     assert bug_gen_dir.startswith(str(LOG_DIR_BUG_GEN)), (
         f"bug_gen_dir must be of form {str(LOG_DIR_BUG_GEN)}/<repo name>"
@@ -151,7 +152,12 @@ def main(
 
     # Get validated instance ids
     validated_inst_ids = []
-    if not include_invalid_patches:
+    if validated_instances_file:
+        validated_inst_ids = [
+            x[KEY_INSTANCE_ID].split(".")[-1]
+            for x in json.load(open(validated_instances_file))
+        ]
+    elif not include_invalid_patches:
         validated_inst_ids = [
             x[KEY_INSTANCE_ID].split(".")[-1]
             for x in json.load(open(os.path.join(LOG_DIR_TASKS, f"{repo}.json")))
@@ -163,12 +169,16 @@ def main(
     remove_paths(map_path_to_patches, depth, bug_gen_dir)
     remove_empty_paths(map_path_to_patches)
     map_path_to_patches = collapse_subdicts(map_path_to_patches, depth)
+    restrict_to_validated = (
+        validated_instances_file is not None or not include_invalid_patches
+    )
     for k in list(map_path_to_patches.keys()):
         map_path_to_patches[k] = [
             x
             for x in convert_nested_dict_to_list(map_path_to_patches[k])
-            if not include_invalid_patches
-            and x.split(f"{PREFIX_BUG}__")[-1].split(".diff")[0] in validated_inst_ids
+            if not restrict_to_validated
+            or x.split(f"{PREFIX_BUG}__")[-1].split(".diff")[0]
+            in validated_inst_ids
         ]
         if k.endswith(".py") or len(map_path_to_patches[k]) == 0:
             del map_path_to_patches[k]
@@ -253,6 +263,10 @@ if __name__ == "__main__":
         type=int,
         help="Depth of the module to combine patches from",
         default=3,
+    )
+    parser.add_argument(
+        "--validated-instances-file",
+        help="JSON task list whose instance IDs are the only patches eligible for combining.",
     )
     args = parser.parse_args()
     main(**vars(args))

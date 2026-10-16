@@ -39,6 +39,7 @@ def main(
     limit_per_file: int,
     max_combos: int,
     include_invalid_patches: bool = False,
+    validated_instances_file: str | None = None,
 ):
     assert bug_gen_dir.startswith(str(LOG_DIR_BUG_GEN)), (
         f"bug_gen_dir must be of form {str(LOG_DIR_BUG_GEN)}/<repo name>"
@@ -53,7 +54,12 @@ def main(
     ]
 
     validated_inst_ids = []
-    if not include_invalid_patches:
+    if validated_instances_file:
+        validated_inst_ids = [
+            x[KEY_INSTANCE_ID].split(".")[-1]
+            for x in json.load(open(validated_instances_file))
+        ]
+    elif not include_invalid_patches:
         validated_inst_ids = [
             x[KEY_INSTANCE_ID].split(".")[-1]
             for x in json.load(open(os.path.join(LOG_DIR_TASKS, f"{repo}.json")))
@@ -72,7 +78,11 @@ def main(
                 ):
                     continue
                 inst_id = file.split(f"{PREFIX_BUG}__")[-1].split(".diff")[0]
-                if not include_invalid_patches and inst_id not in validated_inst_ids:
+                restrict_to_validated = (
+                    validated_instances_file is not None
+                    or not include_invalid_patches
+                )
+                if restrict_to_validated and inst_id not in validated_inst_ids:
                     continue
                 patch_files.append(os.path.join(root, file))
 
@@ -155,6 +165,10 @@ if __name__ == "__main__":
         "--include_invalid_patches",
         action="store_true",
         help="Include invalid patches.",
+    )
+    parser.add_argument(
+        "--validated-instances-file",
+        help="JSON task list whose instance IDs are the only patches eligible for combining.",
     )
     args = parser.parse_args()
     main(**vars(args))
