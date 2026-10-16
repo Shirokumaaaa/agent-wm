@@ -69,6 +69,7 @@ class SWESmithConfig:
     existing_task_file: Path | None
     local_repositories: tuple[LocalRepositoryConfig, ...]
     local_repository_limit: int
+    local_repository_workers: int
     local_generation_workers: int
     local_validation_workers: int
     local_issue_mode: str
@@ -87,6 +88,7 @@ class SWEAgentConfig:
     docker_group_wrapper: bool
     docker_group: str
     container_proxy_url: str | None
+    container_network_mode: str | None
     startup_timeout: float | None
     num_workers: int | None
 
@@ -192,6 +194,9 @@ class PipelineConfig:
                 local_repository_limit=int(
                     smith.get("local_repository_limit", len(local_repositories))
                 ),
+                local_repository_workers=int(
+                    smith.get("local_repository_workers", 1)
+                ),
                 local_generation_workers=int(smith.get("local_generation_workers", 1)),
                 local_validation_workers=int(smith.get("local_validation_workers", 4)),
                 local_issue_mode=str(smith.get("local_issue_mode", "static")),
@@ -215,6 +220,11 @@ class PipelineConfig:
                 docker_group=str(agent.get("docker_group", "docker")),
                 container_proxy_url=(
                     str(agent["container_proxy_url"]) if agent.get("container_proxy_url") else None
+                ),
+                container_network_mode=(
+                    str(agent["container_network_mode"])
+                    if agent.get("container_network_mode")
+                    else None
                 ),
                 startup_timeout=(
                     float(agent["startup_timeout"])

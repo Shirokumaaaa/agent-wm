@@ -293,13 +293,25 @@ def test_mirror_exists():
     # Reset cache for the second test
     repo_profile._cache_mirror_exists = None
 
-    # Test when mirror does not exist (api.repos.get raises Exception)
+    # A 404 means that the mirror genuinely does not exist.
     with patch.object(repo_profile.api, "repos") as mock_repos:
-        mock_repos.get.side_effect = Exception("not found")
+        mock_repos.get.side_effect = urllib.error.HTTPError(
+            "url", 404, "Not Found", {}, None
+        )
         assert repo_profile._mirror_exists() is False
         mock_repos.get.assert_called_once_with(
             owner=repo_profile.org_gh, repo=repo_profile.repo_name
         )
+
+    # Authentication, rate-limit, and network errors must not be reported as
+    # a missing mirror.
+    repo_profile._cache_mirror_exists = None
+    with patch.object(repo_profile.api, "repos") as mock_repos:
+        mock_repos.get.side_effect = urllib.error.HTTPError(
+            "url", 403, "Forbidden", {}, None
+        )
+        with pytest.raises(RuntimeError, match="Set GITHUB_TOKEN"):
+            repo_profile._mirror_exists()
 
 
 def test_create_mirror():

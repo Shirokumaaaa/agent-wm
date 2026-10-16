@@ -1,0 +1,94 @@
+workspace_root: ../..
+
+run:
+  output_root: watermark-pipeline/runs
+  resume: true
+
+swesmith:
+  task_source: local_production
+  enabled: true
+  project_dir: SWE-smith
+  local_repositories:
+    - pallets__markupsafe.620c06c9
+    - pallets__click.fde47b4b
+    - pallets__flask.bc098406
+    - pallets__jinja.ada0a9a6
+    - profile: marshmallow-code__marshmallow.9716fc62
+      base_branch: dev
+  local_repository_limit: 5
+  # Run all five repositories concurrently. Per-repository worker counts below
+  # keep aggregate API and Docker concurrency bounded.
+  local_repository_workers: 5
+
+  # 700 direct attempts provide headroom for validation attrition. Selection is
+  # round-robin across generator and repository, and stops at exactly 100 tasks.
+  generators:
+    - id: lm_modify
+      kind: lm_modify
+      budget: 150
+      config_file: configs/bug_gen/lm_modify.yml
+      model: deepseek/deepseek-flash
+      workers: 2
+    - id: lm_rewrite
+      kind: lm_rewrite
+      budget: 150
+      config_file: configs/bug_gen/lm_rewrite.yml
+      model: deepseek/deepseek-flash
+      workers: 2
+    - id: procedural
+      kind: procedural
+      budget: 400
+
+  combiners:
+    - id: combine_file
+      kind: combine_file
+      sources: [lm_modify, lm_rewrite, procedural]
+      num_patches: 2
+      limit: 30
+      max_combos: 300
+    - id: combine_module
+      kind: combine_module
+      sources: [lm_modify, lm_rewrite, procedural]
+      num_patches: 2
+      limit: 30
+      max_combos: 300
+      depth: 2
+
+  local_validation_workers: 2
+  local_issue_mode: llm
+  issue_gen_config: watermark-pipeline/configs/issue_gen/ig_deepseek.yaml
+  issue_gen_workers: 2
+  local_image_tag_prefix: wm-mixed100
+  task_limit: 100
+  required_task_count: 100
+
+sweagent:
+  executable: .venv/bin/sweagent
+  project_dir: SWE-agent
+  config: SWE-agent/config/swesmith_deepseek_flash.yaml
+  docker_group_wrapper: true
+  docker_group: docker
+  # The workstation proxy is exposed to bridge-network containers through the
+  # host-gateway forward on port 17895. Keep independent container networking
+  # so SWE-ReX can allocate one runtime port per task.
+  container_proxy_url: http://host.docker.internal:17895
+  startup_timeout: 600
+  num_workers: 5
+
+sampler:
+  model: deepseek/deepseek-flash
+  api_base: https://api.deepseek.com
+  api_key_env: DEEPSEEK_API_KEY
+  watermark: "00001100001010101101001001110000011111110000101001000100010110010100111000001000011110000100001100110111110000010101010111111000"
+  code_key: "e4553c974e2b4bcf81036788012c48fcd34bdd1caee54113d68453e07a3ff591"
+  task_key: "020619c1b5aaa7bf95d86bafd2a263701e43ce282ad45f9a1ba1bb48df772dfd"
+  response_key: "76db9f1e1d2c50ab2746f5bc59d7df2fabfabd70bd0b869510facf95bb78122a"
+  key_id: mixed-100-v1
+  max_attempts: 32
+  candidates_per_round: 4
+  code_modulus: 2147483647
+  modulus: 4
+  target: 0
+
+export:
+  write_derived_trajectory: true

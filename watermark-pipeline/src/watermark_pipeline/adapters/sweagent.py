@@ -198,19 +198,36 @@ def _write_runtime_config(
         )
 
     proxy_url = config.sweagent.container_proxy_url
-    if proxy_url:
+    network_mode = config.sweagent.container_network_mode
+    if proxy_url or network_mode:
         docker_args = list(data["instances"]["deployment"].get("docker_args", []))
-        proxy_args = [
-            "--add-host=host.docker.internal:host-gateway",
-            f"--env=HTTP_PROXY={proxy_url}",
-            f"--env=HTTPS_PROXY={proxy_url}",
-            f"--env=http_proxy={proxy_url}",
-            f"--env=https_proxy={proxy_url}",
-            "--env=NO_PROXY=localhost,127.0.0.1",
-        ]
-        for argument in proxy_args:
-            if argument not in docker_args:
-                docker_args.append(argument)
+        if network_mode:
+            docker_args = [
+                argument
+                for argument in docker_args
+                if not str(argument).startswith("--network=")
+            ]
+            docker_args.append(f"--network={network_mode}")
+        if proxy_url:
+            # host.docker.internal is only reachable when the proxy listens on a
+            # host interface. A host-networked deployment can use loopback,
+            # which is also the standard address for the workstation proxy.
+            proxy_host_arg = (
+                "--add-host=host.docker.internal:host-gateway"
+                if network_mode != "host"
+                else None
+            )
+            proxy_args = [
+                proxy_host_arg,
+                f"--env=HTTP_PROXY={proxy_url}",
+                f"--env=HTTPS_PROXY={proxy_url}",
+                f"--env=http_proxy={proxy_url}",
+                f"--env=https_proxy={proxy_url}",
+                "--env=NO_PROXY=localhost,127.0.0.1",
+            ]
+            for argument in proxy_args:
+                if argument is not None and argument not in docker_args:
+                    docker_args.append(argument)
         data["instances"]["deployment"]["docker_args"] = docker_args
 
     runtime_config = run_dir / "sweagent.runtime.yaml"

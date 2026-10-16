@@ -1,0 +1,47 @@
+workspace_root: ../..
+
+run:
+  output_root: watermark-pipeline/runs
+  resume: true
+
+# The 245 instances below are already issue-generated, validated, and built
+# into their repository-specific local images. This replay consumes every one
+# of them; no task-limit selection is applied.
+swesmith:
+  task_source: existing
+  enabled: false
+  project_dir: SWE-smith
+  existing_task_file: watermark-pipeline/runs/mixed-100-20261016/tasks/tasks_all245.json
+  task_limit: null
+  required_task_count: null
+
+sweagent:
+  executable: .venv/bin/sweagent
+  project_dir: SWE-agent
+  config: SWE-agent/config/swesmith_deepseek_flash.yaml
+  docker_group_wrapper: true
+  docker_group: docker
+  # The workstation proxy is exposed to bridge-network containers through the
+  # host-gateway forward on port 17895. Keep independent container networking
+  # so SWE-ReX can allocate one runtime port per task.
+  container_proxy_url: http://host.docker.internal:17895
+  startup_timeout: 600
+  num_workers: 5
+
+sampler:
+  model: deepseek/deepseek-flash
+  api_base: https://api.deepseek.com
+  api_key_env: DEEPSEEK_API_KEY
+  watermark: "00001100001010101101001001110000011111110000101001000100010110010100111000001000011110000100001100110111110000010101010111111000"
+  code_key: "e4553c974e2b4bcf81036788012c48fcd34bdd1caee54113d68453e07a3ff591"
+  task_key: "020619c1b5aaa7bf95d86bafd2a263701e43ce282ad45f9a1ba1bb48df772dfd"
+  response_key: "76db9f1e1d2c50ab2746f5bc59d7df2fabfabd70bd0b869510facf95bb78122a"
+  key_id: mixed-100-v1
+  max_attempts: 32
+  candidates_per_round: 4
+  code_modulus: 2147483647
+  modulus: 4
+  target: 0
+
+export:
+  write_derived_trajectory: true

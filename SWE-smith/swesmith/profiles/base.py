@@ -281,8 +281,18 @@ class RepoProfile(ABC, metaclass=SingletonMeta):
             try:
                 self.api.repos.get(owner=self.org_gh, repo=self.repo_name)
                 self._cache_mirror_exists = True
-            except:
+            except urllib.error.HTTPError as error:
+                if error.code != 404:
+                    raise RuntimeError(
+                        f"GitHub API failed while checking mirror {self.mirror_name}: "
+                        f"HTTP {error.code}. Set GITHUB_TOKEN and retry."
+                    ) from error
                 self._cache_mirror_exists = False
+            except Exception as error:
+                raise RuntimeError(
+                    f"GitHub API failed while checking mirror {self.mirror_name}; "
+                    "the mirror's existence is unknown"
+                ) from error
         return self._cache_mirror_exists
 
     def _prepare_dockerfile(self, content: str) -> str:

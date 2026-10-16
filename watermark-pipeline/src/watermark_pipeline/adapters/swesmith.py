@@ -7,8 +7,10 @@ import re
 import shlex
 import shutil
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Lock
 from typing import Any, Callable
 
 from watermark_pipeline.config import (
@@ -45,6 +47,8 @@ def describe_generation_plan(config: PipelineConfig) -> dict[str, Any]:
             "swesmith.local_repository_limit must be between 1 and the number "
             f"of configured repositories ({len(smith.local_repositories)})"
         )
+    if smith.local_repository_workers <= 0:
+        raise RuntimeError("swesmith.local_repository_workers must be positive")
     repositories = smith.local_repositories[: smith.local_repository_limit]
     rendered_generators = []
     for generator in smith.generators:
@@ -81,6 +85,7 @@ def describe_generation_plan(config: PipelineConfig) -> dict[str, Any]:
     return {
         "task_source": smith.task_source,
         "repositories": [repository.profile for repository in repositories],
+        "repository_workers": smith.local_repository_workers,
         "generators": rendered_generators,
         "combiners": [
             {
@@ -241,6 +246,8 @@ def _produce_local_tasks(
             "swesmith.local_repository_limit must be between 1 and the number "
             f"of configured repositories ({len(repositories)})"
         )
+    if smith.local_repository_workers <= 0:
+        raise RuntimeError("swesmith.local_repository_workers must be positive")
     repositories = repositories[: smith.local_repository_limit]
     for generator in smith.generators:
         if generator.kind != "mirror" and generator.budget < len(repositories):
@@ -278,7 +285,7 @@ def _produce_local_tasks(
         generator.id: _distribute_budget(generator.budget, len(repositories))
         for generator in smith.generators
     }
-    task_groups: list[list[dict[str, Any]]] = []
+    task_groups: list[list[dict[str, Any]]] = [[] for _ in repositories]
     evidence_path = tasks_dir / "task_production.json"
     previous_repositories: dict[str, dict[str, Any]] = {}
     if evidence_path.is_file():
@@ -295,23 +302,32 @@ def _produce_local_tasks(
         "combiners": [combiner.id for combiner in smith.combiners],
         "local_issue_mode": smith.local_issue_mode,
         "repository_limit": smith.local_repository_limit,
+        "repository_workers": min(smith.local_repository_workers, len(repositories)),
         "planned_bug_attempts": sum(generator.budget for generator in smith.generators),
         "required_task_count": required_count,
         "selected_instance_ids": [],
-        "repositories": [],
+        "repositories": [
+            _new_repository_evidence(
+                repository,
+                sum(values[repository_index] for values in generator_budgets.values()),
+            )
+            for repository_index, repository in enumerate(repositories)
+        ],
     }
+    evidence_lock = Lock()
     _write_production_evidence(evidence_path, evidence_payload)
-    for repository_index, repository in enumerate(repositories):
+
+    def produce_repository(repository_index: int) -> None:
+        repository = repositories[repository_index]
         budgets = {
             generator_id: values[repository_index]
             for generator_id, values in generator_budgets.items()
         }
-        repository_evidence = _new_repository_evidence(repository, sum(budgets.values()))
-        evidence_payload["repositories"].append(repository_evidence)
-        _write_production_evidence(evidence_path, evidence_payload)
+        repository_evidence = evidence_payload["repositories"][repository_index]
 
         def persist_evidence() -> None:
-            _write_production_evidence(evidence_path, evidence_payload)
+            with evidence_lock:
+                _write_production_evidence(evidence_path, evidence_payload)
 
         try:
             tasks = _produce_local_repository_tasks(
@@ -329,24 +345,45 @@ def _produce_local_tasks(
                 "Local SWE-smith production failed for %s",
                 repository.profile,
             )
-            task_groups.append([])
             repository_evidence["status"] = "failed"
             repository_evidence["error"] = f"{type(error).__name__}: {error}"
             _fail_started_attempt_stages(repository_evidence)
         else:
-            task_groups.append(tasks)
+            task_groups[repository_index] = tasks
             repository_evidence["status"] = (
                 "completed_with_failures"
                 if _repository_has_failures(repository_evidence)
                 else "succeeded"
             )
-        _write_production_evidence(evidence_path, evidence_payload)
+        persist_evidence()
 
-    produced_tasks = _round_robin(task_groups)
+    worker_count = min(smith.local_repository_workers, len(repositories))
+    LOGGER.info(
+        "Starting local SWE-smith production for %d repositories with %d repository workers",
+        len(repositories),
+        worker_count,
+    )
+    with ThreadPoolExecutor(
+        max_workers=worker_count,
+        thread_name_prefix="swesmith-repository",
+    ) as executor:
+        futures = [
+            executor.submit(produce_repository, repository_index)
+            for repository_index in range(len(repositories))
+        ]
+        for future in as_completed(futures):
+            future.result()
+
+    producer_order = [generator.id for generator in smith.generators] + [
+        combiner.id for combiner in smith.combiners
+    ]
+    produced_tasks = _round_robin_by_producer(task_groups, producer_order)
     if smith.task_limit is not None:
         produced_tasks = produced_tasks[: smith.task_limit]
     selected_count = required_count if required_count is not None else len(produced_tasks)
     produced_tasks = produced_tasks[:selected_count]
+    for task in produced_tasks:
+        task["bug_generator"] = task.pop("_wm_generator_id", "unknown")
     selected_ids = {str(task["instance_id"]) for task in produced_tasks}
     for repository_evidence in evidence_payload["repositories"]:
         for artifact in repository_evidence.get("artifacts", []):
@@ -447,11 +484,25 @@ def _produce_local_repository_tasks(
         job["command"] = [str(part) for part in command]
         job["status"] = "running"
         persist_evidence()
-        run_command(command, cwd=smith.project_dir, env=generation_env)
-        after_ids = _bug_artifact_ids(bug_dir, repository.profile)
-        new_ids = sorted(after_ids - before_ids)[:budget]
-        job["artifact_instance_ids"] = new_ids
-        job["status"] = "succeeded" if new_ids else "completed_empty"
+        try:
+            run_command(command, cwd=smith.project_dir, env=generation_env)
+        except Exception as error:
+            LOGGER.exception(
+                "SWE-smith generator %s failed for %s; preserving other generators",
+                generator.id,
+                repository.profile,
+            )
+            new_ids = sorted(
+                _bug_artifact_ids(bug_dir, repository.profile) - before_ids
+            )[:budget]
+            job["artifact_instance_ids"] = new_ids
+            job["status"] = "failed_with_artifacts" if new_ids else "failed"
+            job["error"] = f"{type(error).__name__}: {error}"
+        else:
+            after_ids = _bug_artifact_ids(bug_dir, repository.profile)
+            new_ids = sorted(after_ids - before_ids)[:budget]
+            job["artifact_instance_ids"] = new_ids
+            job["status"] = "succeeded" if new_ids else "completed_empty"
         generated_ids.update({instance_id: generator.id for instance_id in new_ids})
         persist_evidence()
 
@@ -512,14 +563,35 @@ def _produce_local_repository_tasks(
             job["command"] = [str(part) for part in command]
             job["status"] = "running"
             persist_evidence()
-            run_command(command, cwd=smith.project_dir)
-            new_ids = sorted(
-                _bug_artifact_ids(bug_dir, repository.profile) - before_ids
-            )
-            if combiner.limit > 0:
-                new_ids = new_ids[: combiner.limit]
-            job["artifact_instance_ids"] = new_ids
-            job["status"] = "succeeded" if new_ids else "completed_empty"
+            try:
+                run_command(command, cwd=smith.project_dir, env=generation_env)
+            except Exception as error:
+                LOGGER.exception(
+                    "SWE-smith combiner %s failed for %s; preserving validated tasks",
+                    combiner.id,
+                    repository.profile,
+                )
+                new_ids = sorted(
+                    _bug_artifact_ids(bug_dir, repository.profile) - before_ids
+                )
+                if combiner.limit > 0:
+                    new_ids = new_ids[: combiner.limit]
+                job["artifact_instance_ids"] = new_ids
+                job["status"] = "failed_with_artifacts" if new_ids else "failed"
+                job["error"] = f"{type(error).__name__}: {error}"
+                generated_ids.update(
+                    {instance_id: combiner.id for instance_id in new_ids}
+                )
+                persist_evidence()
+                continue
+            else:
+                new_ids = sorted(
+                    _bug_artifact_ids(bug_dir, repository.profile) - before_ids
+                )
+                if combiner.limit > 0:
+                    new_ids = new_ids[: combiner.limit]
+                job["artifact_instance_ids"] = new_ids
+                job["status"] = "succeeded" if new_ids else "completed_empty"
         persist_evidence()
         if not new_ids:
             continue
@@ -600,8 +672,6 @@ def _produce_local_repository_tasks(
     evidence["local_image_command"] = [str(part) for part in image_command]
     evidence["local_image"] = image_name
     persist_evidence()
-    for task in produced_tasks:
-        task.pop("_wm_generator_id", None)
     return produced_tasks
 
 
@@ -1069,7 +1139,7 @@ def _fail_started_attempt_stages(repository_evidence: dict[str, Any]) -> None:
 
 def _repository_has_failures(repository_evidence: dict[str, Any]) -> bool:
     return any(
-        job.get("status") == "failed"
+        str(job.get("status", "")).startswith("failed")
         for job in repository_evidence.get("jobs", [])
     ) or any(
         not artifact.get("validated", False)
@@ -1101,14 +1171,37 @@ def _write_production_evidence(path: Path, payload: dict[str, Any]) -> None:
     temporary.replace(path)
 
 
-def _round_robin(groups: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
+def _round_robin_by_producer(
+    repository_groups: list[list[dict[str, Any]]],
+    producer_order: list[str],
+) -> list[dict[str, Any]]:
+    grouped = [
+        {
+            producer: [
+                task
+                for task in repository_tasks
+                if task.get("_wm_generator_id") == producer
+            ]
+            for producer in producer_order
+        }
+        for repository_tasks in repository_groups
+    ]
+    positions = [
+        {producer: 0 for producer in producer_order} for _ in repository_groups
+    ]
     merged: list[dict[str, Any]] = []
-    max_size = max((len(group) for group in groups), default=0)
-    for index in range(max_size):
-        for group in groups:
-            if index < len(group):
-                merged.append(group[index])
-    return merged
+    while True:
+        added = False
+        for producer in producer_order:
+            for repository_index, repository in enumerate(grouped):
+                position = positions[repository_index][producer]
+                tasks = repository[producer]
+                if position < len(tasks):
+                    merged.append(tasks[position])
+                    positions[repository_index][producer] += 1
+                    added = True
+        if not added:
+            return merged
 
 
 def _slug(value: str) -> str:
