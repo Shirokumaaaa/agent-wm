@@ -1,0 +1,79 @@
+### model
+model_name_or_path: /mnt/sda/kei/models/Qwen3-8B
+trust_remote_code: false
+flash_attn: sdpa
+# Fused linear cross-entropy avoids materializing a sequence-by-vocabulary
+# FP32 logits tensor, which otherwise exceeds 24 GiB at these context lengths.
+enable_liger_kernel: true
+
+# Quantize only the frozen base model.  The trainable LoRA parameters remain
+# in floating point so the run fits one 24 GiB RTX 4090 at long context.
+quantization_method: bnb
+quantization_bit: 4
+quantization_type: nf4
+double_quantization: true
+
+### method
+stage: sft
+do_train: true
+finetuning_type: lora
+# Avoid the sequence-sized LoRA temporaries of the 12,288-wide MLP projections
+# at 30K context while retaining all attention projections.
+lora_target: q_proj,k_proj,v_proj,o_proj
+lora_rank: 16
+lora_alpha: 32
+lora_dropout: 0.05
+
+### dataset
+dataset: watermark_sft_qwen3_nothink
+dataset_dir: /mnt/sda/kei/training-data/watermark-sft-qwen3-8b-20261021
+template: qwen3_nothink
+enable_thinking: false
+cutoff_len: 32768
+train_on_prompt: false
+mask_history: true
+packing: false
+val_size: 0.0
+overwrite_cache: false
+preprocessing_num_workers: 8
+dataloader_num_workers: 2
+
+### output
+output_dir: /mnt/sda/kei/training-runs/qwen3-8b-watermark-qlora-v2
+overwrite_output_dir: false
+logging_strategy: steps
+logging_steps: 1
+logging_first_step: true
+save_strategy: steps
+save_steps: 5
+save_total_limit: 5
+save_only_model: false
+plot_loss: true
+report_to: none
+
+### training
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 8
+learning_rate: 1.0e-4
+num_train_epochs: 5.0
+lr_scheduler_type: cosine
+# 217 samples / accumulation 8 => 28 optimizer steps per epoch, 140 total.
+# Seven warmup steps are exactly 5% without relying on deprecated warmup_ratio.
+warmup_steps: 7
+weight_decay: 0.0
+max_grad_norm: 1.0
+optim: paged_adamw_8bit
+bf16: true
+tf32: true
+gradient_checkpointing: true
+use_reentrant_gc: false
+use_cache: false
+torch_empty_cache_steps: 1
+seed: 42
+data_seed: 42
+ddp_timeout: 180000000
+include_num_input_tokens_seen: true
+
+### evaluation
+eval_strategy: "no"
+do_eval: false
